@@ -144,11 +144,13 @@ constant-time comparison; only key prefixes in logs; TLS terminates at
 Traefik, the binary listens on plain HTTP behind the proxy; rate limit per
 write key.
 
-> Implemented 2026-06-12 (revised same day to support direct browser ingest):
-> public per-product write keys via `PULSE_WRITE_KEYS=product:key,…` (header
-> or `?key=` for sendBeacon; product pinned to the key), private
-> `PULSE_API_KEY` for the admin surface (MCP, erasure; also ingests with
-> body-supplied product). Origin allowlist + CORS gate browser requests.
+> Implemented 2026-06-12 (revised twice same day, final model — three tiers):
+> public per-product client keys (`PULSE_CLIENT_KEYS`, source forced to
+> 'client', `?key=` for sendBeacon), secret per-product server keys
+> (`PULSE_SERVER_KEYS`, append-only but may claim source='server' — the
+> integrity channel), and the operator-only `PULSE_ADMIN_KEY` (MCP + erasure,
+> deliberately cannot ingest so it never ends up in an app's env). Origin
+> allowlist + CORS gate browser requests.
 
 ### 6.2 Privacy (GDPR)
 

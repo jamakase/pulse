@@ -9,17 +9,22 @@ use pulse::{AppState, compactor, config::Config, query::QueryEngine, wal::Wal};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-const KEY: &str = "test-key-0123456789abcdef";
-const WRITE_KEY: &str = "pw_demo_0123456789abcdef";
+const KEY: &str = "test-key-0123456789abcdef"; // admin: MCP + erasure only
+const SERVER_KEY: &str = "ps_demo_0123456789abcdef"; // secret, append, source='server' allowed
+const CLIENT_KEY: &str = "pc_demo_0123456789abcdef"; // public, append, source forced 'client'
 
 fn test_config(dir: &std::path::Path) -> Config {
     Config {
         port: 0,
         data_dir: dir.to_path_buf(),
-        api_key: KEY.to_string(),
-        write_keys: vec![pulse::config::WriteKey {
+        admin_key: KEY.to_string(),
+        server_keys: vec![pulse::config::ProductKey {
             product: "demo".to_string(),
-            key: WRITE_KEY.to_string(),
+            key: SERVER_KEY.to_string(),
+        }],
+        client_keys: vec![pulse::config::ProductKey {
+            product: "demo".to_string(),
+            key: CLIENT_KEY.to_string(),
         }],
         allowed_origins: vec!["https://app.example.com".to_string()],
         compact_interval_secs: 3600,
@@ -118,7 +123,7 @@ async fn ingest_requires_key_and_allowed_origin() {
     let resp = app
         .oneshot(post_events(
             events.clone(),
-            Some(KEY),
+            Some(SERVER_KEY),
             Some("https://evil.example.com"),
         ))
         .await
@@ -130,7 +135,7 @@ async fn ingest_requires_key_and_allowed_origin() {
     let resp = app
         .oneshot(post_events(
             events,
-            Some(KEY),
+            Some(SERVER_KEY),
             Some("https://app.example.com"),
         ))
         .await
@@ -142,13 +147,15 @@ async fn ingest_requires_key_and_allowed_origin() {
 async fn ingest_validates_and_strips_pii() {
     let h = harness();
     let app = pulse::build_router(h.state.clone());
+    // `product` is omitted on purpose: it always comes from the key now.
+    // The second event has no name and must be rejected.
     let batch = json!({"events": [
-        {"product": "demo", "event": "signup", "user_id": "u1",
+        {"event": "signup", "user_id": "u1",
          "properties": {"email": "a@b.c", "plan": "pro"}},
-        {"event": "missing-product"}
+        {"user_id": "u2"}
     ]});
     let resp = app
-        .oneshot(post_events(batch, Some(KEY), None))
+        .oneshot(post_events(batch, Some(SERVER_KEY), None))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
@@ -177,7 +184,7 @@ async fn full_cycle_ingest_compact_query() {
          "occurred_at": "2026-06-01T10:05:00Z", "properties": {"total": 100}},
     ]);
     let resp = app
-        .oneshot(post_events(batch1, Some(KEY), None))
+        .oneshot(post_events(batch1, Some(SERVER_KEY), None))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
@@ -199,7 +206,7 @@ async fn full_cycle_ingest_compact_query() {
          "occurred_at": "2026-06-02T09:00:00Z"},
     ]);
     let resp = app
-        .oneshot(post_events(batch2, Some(KEY), None))
+        .oneshot(post_events(batch2, Some(SERVER_KEY), None))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
@@ -283,7 +290,7 @@ async fn funnel_counts_users_per_step() {
         {"product":"demo","event":"signup","user_id":"u4","occurred_at":"2026-06-01T11:00:00Z"}
     ]);
     let resp = app
-        .oneshot(post_events(batch, Some(KEY), None))
+        .oneshot(post_events(batch, Some(SERVER_KEY), None))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
@@ -332,7 +339,7 @@ async fn identity_links_stitch_anonymous_history() {
          "occurred_at":"2026-06-01T10:30:00Z"}
     ]);
     let resp = app
-        .oneshot(post_events(batch, Some(KEY), None))
+        .oneshot(post_events(batch, Some(SERVER_KEY), None))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
@@ -373,7 +380,7 @@ async fn erase_user_endpoint_removes_data() {
         {"product":"demo","event":"signup","user_id":"stays","occurred_at":"2026-06-01T11:00:00Z"}
     ]);
     let resp = app
-        .oneshot(post_events(batch, Some(KEY), None))
+        .oneshot(post_events(batch, Some(SERVER_KEY), None))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
@@ -427,7 +434,7 @@ async fn write_key_forces_product_and_cannot_read() {
         .oneshot(post_events(
             json!([{"product": "spoofed", "event": "signup", "user_id": "u1",
                     "source": "server"}]),
-            Some(WRITE_KEY),
+            Some(CLIENT_KEY),
             None,
         ))
         .await
@@ -438,7 +445,7 @@ async fn write_key_forces_product_and_cannot_read() {
     let app = pulse::build_router(h.state.clone());
     let req = Request::builder()
         .method("POST")
-        .uri(format!("/v1/events?key={WRITE_KEY}"))
+        .uri(format!("/v1/events?key={CLIENT_KEY}"))
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ORIGIN, "https://app.example.com")
         .body(Body::from(json!([{"event": "page_view"}]).to_string()))
@@ -467,7 +474,7 @@ async fn write_key_forces_product_and_cannot_read() {
     let resp = app
         .oneshot(
             Request::delete("/v1/users/u1?product=demo")
-                .header(header::AUTHORIZATION, format!("Bearer {WRITE_KEY}"))
+                .header(header::AUTHORIZATION, format!("Bearer {CLIENT_KEY}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -479,7 +486,56 @@ async fn write_key_forces_product_and_cannot_read() {
     let resp = app
         .oneshot(
             Request::post("/mcp")
-                .header(header::AUTHORIZATION, format!("Bearer {WRITE_KEY}"))
+                .header(header::AUTHORIZATION, format!("Bearer {CLIENT_KEY}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn key_tiers_enforce_trust_levels() {
+    let h = harness();
+
+    // The admin key deliberately CANNOT ingest — it must never live in an app.
+    let app = pulse::build_router(h.state.clone());
+    let resp = app
+        .oneshot(post_events(json!([{"event": "x"}]), Some(KEY), None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Server key: append-only but trusted — source='server' (the default)
+    // survives.
+    let app = pulse::build_router(h.state.clone());
+    let resp = app
+        .oneshot(post_events(
+            json!([{"event": "payment_completed", "user_id": "u1"}]),
+            Some(SERVER_KEY),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let rows = h
+        .state
+        .engine
+        .query("SELECT event, source FROM events", 10)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["source"], "server");
+
+    // Server key still can't read or erase.
+    let app = pulse::build_router(h.state.clone());
+    let resp = app
+        .oneshot(
+            Request::post("/mcp")
+                .header(header::AUTHORIZATION, format!("Bearer {SERVER_KEY}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from("{}"))
                 .unwrap(),

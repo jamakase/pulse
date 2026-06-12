@@ -25,13 +25,21 @@ pub struct IngestQuery {
     pub key: Option<String>,
 }
 
-/// Admin key → trust `product` from the body. Write key → the product is
-/// derived from the key; whatever the body claims is overwritten.
+struct IngestGrant {
+    product: String,
+    /// Server keys are secret → their events may claim source='server'.
+    /// Client keys are public → everything is demoted to source='client'.
+    trusted: bool,
+}
+
+/// Ingest accepts ONLY per-product keys. The admin key deliberately cannot
+/// ingest: it never needs to leave the operator's machine, so it never ends
+/// up in an app's env by convenience.
 fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
     query_key: Option<&str>,
-) -> Result<Option<String>, StatusCode> {
+) -> Result<IngestGrant, StatusCode> {
     let provided = match auth::bearer(headers) {
         "" => query_key.unwrap_or(""),
         bearer => bearer,
@@ -39,12 +47,20 @@ fn authenticate(
     if provided.is_empty() {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    if auth::key_matches(provided, &state.config.api_key) {
-        return Ok(None);
+    for k in &state.config.server_keys {
+        if auth::key_matches(provided, &k.key) {
+            return Ok(IngestGrant {
+                product: k.product.clone(),
+                trusted: true,
+            });
+        }
     }
-    for wk in &state.config.write_keys {
-        if auth::key_matches(provided, &wk.key) {
-            return Ok(Some(wk.product.clone()));
+    for k in &state.config.client_keys {
+        if auth::key_matches(provided, &k.key) {
+            return Ok(IngestGrant {
+                product: k.product.clone(),
+                trusted: false,
+            });
         }
     }
     Err(StatusCode::UNAUTHORIZED)
@@ -58,20 +74,19 @@ pub async fn ingest(
     headers: HeaderMap,
     Json(batch): Json<Batch>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
-    let forced_product = authenticate(&state, &headers, query.key.as_deref())
+    let grant = authenticate(&state, &headers, query.key.as_deref())
         .map_err(|code| bad(code, "invalid or missing API key"))?;
 
     let mut events = match batch {
         Batch::Wrapped { events } => events,
         Batch::Bare(events) => events,
     };
-    if let Some(product) = &forced_product {
-        for ev in &mut events {
-            ev.product = Some(product.clone());
-            // Write keys are public (they ship in browser JS), so nothing
-            // arriving on one can be trusted as server-originated. Only the
-            // private admin key may claim source='server' — which makes
-            // `WHERE source = 'server'` an integrity guarantee in queries.
+    for ev in &mut events {
+        ev.product = Some(grant.product.clone());
+        if !grant.trusted {
+            // Public client keys can't mint trusted events: only server keys
+            // may claim source='server', which makes `WHERE source='server'`
+            // an integrity guarantee in queries.
             ev.source = Some("client".to_string());
         }
     }

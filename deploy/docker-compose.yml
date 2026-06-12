@@ -14,8 +14,9 @@ services:
     image: ghcr.io/jamakase/pulse:${PULSE_TAG:-latest}
     restart: unless-stopped
     environment:
-      PULSE_API_KEY: ${PULSE_API_KEY:?set PULSE_API_KEY in .env}
-      PULSE_WRITE_KEYS: ${PULSE_WRITE_KEYS:-}
+      PULSE_ADMIN_KEY: ${PULSE_ADMIN_KEY:?set PULSE_ADMIN_KEY in .env}
+      PULSE_SERVER_KEYS: ${PULSE_SERVER_KEYS:-}
+      PULSE_CLIENT_KEYS: ${PULSE_CLIENT_KEYS:-}
       PULSE_ALLOWED_ORIGINS: ${PULSE_ALLOWED_ORIGINS:-}
       PULSE_TTL_DAYS: ${PULSE_TTL_DAYS:-730}
       RUST_LOG: ${RUST_LOG:-pulse=info,info}

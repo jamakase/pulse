@@ -41,25 +41,26 @@ dashboard and stop at page views. pulse takes the opposite bet:
 
 ```bash
 docker run -p 8080:8080 -v pulse-data:/data \
-  -e PULSE_API_KEY=$(openssl rand -hex 24) \
+  -e PULSE_ADMIN_KEY=$(openssl rand -hex 24) \
+  -e PULSE_SERVER_KEYS="myapp:$(openssl rand -hex 24)" \
   ghcr.io/jamakase/pulse:latest
 ```
 
-Send an event:
+Send an event (server key — `product` comes from the key):
 
 ```bash
 curl -s -X POST localhost:8080/v1/events \
-  -H "Authorization: Bearer $PULSE_API_KEY" -H 'Content-Type: application/json' \
-  -d '[{"product":"myapp","event":"signup","user_id":"u1",
+  -H "Authorization: Bearer $MYAPP_SERVER_KEY" -H 'Content-Type: application/json' \
+  -d '[{"event":"signup","user_id":"u1",
         "properties":{"plan":"pro"},"context":{"utm_source":"x"}}]'
 # → 202 {"accepted":1,"rejected":[]}
 ```
 
-Plug it into Claude Code:
+Plug it into Claude Code (admin key):
 
 ```bash
 claude mcp add pulse http://localhost:8080/mcp \
-  -t http -H "Authorization: Bearer $PULSE_API_KEY"
+  -t http -H "Authorization: Bearer $PULSE_ADMIN_KEY"
 ```
 
 …and ask: *"what's the signup → estimate → payment funnel for myapp over the
@@ -90,32 +91,34 @@ Event fields: `product` (required, `[a-zA-Z0-9_-]`), `event` (required),
 `occurred_at` (RFC3339, default = server time), `anonymous_id`, `user_id`,
 `session_id`, `source` (`client`|`server`), `properties`, `context`.
 
-### Two kinds of keys
+### Three tiers of keys
 
-| | write key (`PULSE_WRITE_KEYS`) | admin key (`PULSE_API_KEY`) |
-|---|---|---|
-| grants | `POST /v1/events` only | MCP, erasure, and ingest |
-| product | pinned to the key — body claims are overwritten | taken from the body |
-| source | forced to `client` — a public key cannot mint trusted events | may claim `server` |
-| secrecy | **public** — safe to ship in browser JS (the origin allowlist is the gate) | private, server-side only |
-| leak = | garbage in one product's data | full telemetry read |
+| | client key (`PULSE_CLIENT_KEYS`) | server key (`PULSE_SERVER_KEYS`) | admin key (`PULSE_ADMIN_KEY`) |
+|---|---|---|---|
+| grants | append only | append only | MCP + erasure — **cannot even ingest** |
+| product | pinned to the key | pinned to the key | — |
+| source | forced to `client` | may claim `server` (default) | — |
+| lives | browser JS — public by design | your backends / SSG pipelines | with the operator only; never ships to any app |
+| leak = | garbage events in one product | *forged* trusted events in one product (rotate it) | full telemetry read |
 
-Because only the admin key can write `source='server'`, a `WHERE source =
-'server'` filter in queries is an integrity guarantee, not a convention:
-those events were produced by your backend, full stop. Send decision-grade
-events (payments, subscriptions) server-side with the admin key.
+Per-product keys are append-only; the key that can read or delete never
+leaves your machine. And because only server keys can write
+`source='server'`, a `WHERE source = 'server'` filter in queries is an
+integrity guarantee, not a convention: those events were produced by your
+backend, full stop. Send decision-grade events (payments, subscriptions)
+server-side.
 
 ### Sending from the browser
 
 Two options:
 
 1. **Direct** (PostHog model): set `PULSE_ALLOWED_ORIGINS` to your app's
-   origins and send with the public write key. `?key=` exists because
+   origins and send with the public client key. `?key=` exists because
    `sendBeacon` can't set headers:
 
    ```js
    navigator.sendBeacon(
-     'https://events.example.com/v1/events?key=' + PULSE_WRITE_KEY,
+     'https://events.example.com/v1/events?key=' + PULSE_CLIENT_KEY,
      new Blob([JSON.stringify([{event: 'page_view'}])], {type: 'application/json'}),
    );
    ```
@@ -133,8 +136,9 @@ in every analytics system.
 
 | env | default | purpose |
 |---|---|---|
-| `PULSE_API_KEY` | — (required, ≥16 chars) | private admin key: MCP, erasure, ingest |
-| `PULSE_WRITE_KEYS` | empty | per-product public ingest keys: `myapp:pw_…,other:pw_…` |
+| `PULSE_ADMIN_KEY` | — (required, ≥16 chars) | operator-only key: MCP + erasure (cannot ingest) |
+| `PULSE_SERVER_KEYS` | empty | per-product secret append keys: `myapp:ps_…,other:ps_…` |
+| `PULSE_CLIENT_KEYS` | empty | per-product public append keys: `myapp:pc_…` |
 | `PULSE_PORT` | `8080` | HTTP port |
 | `PULSE_DATA_DIR` | `./data` | WAL + Parquet directory (mount a volume) |
 | `PULSE_ALLOWED_ORIGINS` | empty | CSV of exact Origins allowed for browser requests; empty = any request with an Origin header is rejected |

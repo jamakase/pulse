@@ -26,14 +26,15 @@ pub async fn check_origin(
     Ok(next.run(req).await)
 }
 
-/// Admin surface (MCP, erasure): the private `PULSE_API_KEY` only.
+/// Admin surface (MCP, erasure): the operator-only `PULSE_ADMIN_KEY`.
+/// Product keys — even the secret server ones — get 401 here.
 pub async fn require_admin(
     State(state): State<AppState>,
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
     let provided = bearer(req.headers());
-    if !key_matches(provided, &state.config.api_key) {
+    if !key_matches(provided, &state.config.admin_key) {
         return Err(StatusCode::UNAUTHORIZED);
     }
     Ok(next.run(req).await)

@@ -27,7 +27,7 @@ pub struct AppState {
 /// Full application router: /health is public, /v1/events and /mcp sit behind
 /// bearer auth + origin allowlist.
 pub fn build_router(state: AppState) -> Router {
-    let mcp_service = mcp::service(state.engine.clone());
+    let mcp_service = mcp::service(state.engine.clone(), &state.config);
 
     // Admin surface: private PULSE_API_KEY only.
     let admin = Router::new()

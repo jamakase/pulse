@@ -16,6 +16,10 @@ pub struct Config {
     /// Exact-match Origin allowlist for browser requests (lowercased).
     /// Empty list means requests carrying an Origin header are rejected.
     pub allowed_origins: Vec<String>,
+    /// Host-header allowlist for the MCP transport (DNS-rebinding guard).
+    /// Empty = accept any Host: pulse sits behind a reverse proxy and every
+    /// request is bearer-authenticated, so rebinding gains nothing here.
+    pub allowed_hosts: Vec<String>,
     pub compact_interval_secs: u64,
     pub ttl_days: i64,
     /// Lowercased property/context keys stripped on ingest (PII guard).
@@ -42,6 +46,7 @@ impl Config {
             server_keys: parse_product_keys(&env_or("PULSE_SERVER_KEYS", ""))?,
             client_keys: parse_product_keys(&env_or("PULSE_CLIENT_KEYS", ""))?,
             allowed_origins: csv(&env_or("PULSE_ALLOWED_ORIGINS", "")),
+            allowed_hosts: csv(&env_or("PULSE_ALLOWED_HOSTS", "")),
             compact_interval_secs: env_or("PULSE_COMPACT_INTERVAL_SECS", "60").parse()?,
             ttl_days: env_or("PULSE_TTL_DAYS", "730").parse()?,
             property_denylist: csv(&env_or(

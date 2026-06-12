@@ -27,6 +27,7 @@ fn test_config(dir: &std::path::Path) -> Config {
             key: CLIENT_KEY.to_string(),
         }],
         allowed_origins: vec!["https://app.example.com".to_string()],
+        allowed_hosts: vec![],
         compact_interval_secs: 3600,
         ttl_days: 730,
         property_denylist: vec!["email".to_string(), "phone".to_string()],
@@ -543,4 +544,27 @@ async fn key_tiers_enforce_trust_levels() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn mcp_accepts_public_host_header() {
+    // Behind a reverse proxy the Host header is the public domain; rmcp's
+    // loopback-only default must be disabled (empty allowed_hosts).
+    let h = harness();
+    let app = pulse::build_router(h.state.clone());
+    let resp = app
+        .oneshot(
+            Request::post("/mcp")
+                .header(header::HOST, "events.example.com")
+                .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT, "application/json, text/event-stream")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }

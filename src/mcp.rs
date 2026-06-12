@@ -241,11 +241,22 @@ impl ServerHandler for PulseMcp {
     }
 }
 
-pub fn service(engine: Arc<QueryEngine>) -> StreamableHttpService<PulseMcp, LocalSessionManager> {
+pub fn service(
+    engine: Arc<QueryEngine>,
+    config: &crate::config::Config,
+) -> StreamableHttpService<PulseMcp, LocalSessionManager> {
+    // rmcp's default Host validation only admits loopback (DNS-rebinding
+    // guard for local servers). pulse is bearer-authenticated behind a
+    // reverse proxy, so we accept any Host unless PULSE_ALLOWED_HOSTS pins it.
+    let http_config = if config.allowed_hosts.is_empty() {
+        StreamableHttpServerConfig::default().disable_allowed_hosts()
+    } else {
+        StreamableHttpServerConfig::default().with_allowed_hosts(config.allowed_hosts.clone())
+    };
     StreamableHttpService::new(
         move || Ok(PulseMcp::new(engine.clone())),
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default(),
+        http_config,
     )
 }
 

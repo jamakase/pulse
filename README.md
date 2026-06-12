@@ -1,82 +1,102 @@
 # pulse
 
-Event-аналитика без UI: один Rust-бинарь, который принимает события от любых
-наших продуктов по HTTP и отвечает на аналитические вопросы через MCP
-(интерфейс — LLM-агент, а не дашборд). Хранилище встроено: WAL → Parquet на
-локальном диске, SQL — Apache DataFusion. Подробности и решения — в [PRD.md](PRD.md).
+Event analytics without a UI: a single Rust binary that ingests events from
+any of your products over HTTP and answers analytical questions through MCP —
+the interface is an LLM agent, not a dashboard. Storage is embedded: WAL →
+Parquet on local disk, SQL via Apache DataFusion. Design decisions live in
+[PRD.md](PRD.md).
 
 ```
-продукты ──POST /v1/events──▶ pulse ──WAL──▶ Parquet (product=…/date=…)
-агенты   ◀──MCP /mcp (SQL)──┘
+products ──POST /v1/events──▶ pulse ──WAL──▶ Parquet (product=…/date=…)
+agents   ◀──MCP /mcp (SQL)──┘
 ```
 
-## Запуск
+## Running
 
 ```bash
 PULSE_API_KEY=$(openssl rand -hex 24) cargo run
-# или
-docker build -t pulse . && docker run -p 8080:8080 -v pulse-data:/data \
-  -e PULSE_API_KEY=... pulse
+# or
+docker run -p 8080:8080 -v pulse-data:/data \
+  -e PULSE_API_KEY=... ghcr.io/jamakase/pulse:latest
 ```
 
-### Env-конфиг
+### Configuration (env)
 
-| переменная | default | что делает |
+| variable | default | purpose |
 |---|---|---|
-| `PULSE_API_KEY` | — (обязателен, ≥16 симв.) | bearer-ключ для ingest и MCP |
-| `PULSE_PORT` | `8080` | порт HTTP |
-| `PULSE_DATA_DIR` | `./data` | каталог WAL + Parquet (volume) |
-| `PULSE_ALLOWED_ORIGINS` | пусто | CSV точных Origin для браузерных запросов; пусто = запросы с Origin отклоняются |
-| `PULSE_COMPACT_INTERVAL_SECS` | `60` | период компакции WAL → Parquet |
-| `PULSE_TTL_DAYS` | `730` | удалять партиции старше N дней |
-| `PULSE_PROPERTY_DENYLIST` | `email,phone,name,…` | PII-ключи, вырезаемые из properties/context на входе |
+| `PULSE_API_KEY` | — (required, ≥16 chars) | bearer key for ingest and MCP |
+| `PULSE_PORT` | `8080` | HTTP port |
+| `PULSE_DATA_DIR` | `./data` | WAL + Parquet directory (mount a volume) |
+| `PULSE_ALLOWED_ORIGINS` | empty | CSV of exact Origins allowed for browser requests; empty = requests carrying an Origin header are rejected |
+| `PULSE_COMPACT_INTERVAL_SECS` | `60` | WAL → Parquet compaction period |
+| `PULSE_TTL_DAYS` | `730` | drop partitions older than N days |
+| `PULSE_PROPERTY_DENYLIST` | `email,phone,name,…` | PII keys stripped from properties/context on ingest |
 
 ## API
 
 ```bash
-# приём событий (массив или {"events": [...]}, ≤500 за батч)
+# ingest (array or {"events": [...]}, ≤500 per batch)
 curl -s -X POST localhost:8080/v1/events \
   -H "Authorization: Bearer $PULSE_API_KEY" -H 'Content-Type: application/json' \
-  -d '[{"product":"constractio","event":"signup","user_id":"u1",
-        "properties":{"plan":"pro"},"context":{"utm_source":"vk"}}]'
+  -d '[{"product":"myapp","event":"signup","user_id":"u1",
+        "properties":{"plan":"pro"},"context":{"utm_source":"x"}}]'
 # → 202 {"accepted":1,"rejected":[]}
+
+# GDPR erasure (rewrites partitions without the user's rows)
+curl -s -X DELETE "localhost:8080/v1/users/u1?product=myapp" \
+  -H "Authorization: Bearer $PULSE_API_KEY"
 
 curl -s localhost:8080/health
 ```
 
-Поля события: `product` (обязательно, `[a-zA-Z0-9_-]`), `event` (обязательно),
-`occurred_at` (RFC3339, default — серверное время), `anonymous_id`, `user_id`,
-`session_id`, `source` (`client`|`server`), `properties`, `context` (объекты).
+Event fields: `product` (required, `[a-zA-Z0-9_-]`), `event` (required),
+`occurred_at` (RFC3339, defaults to server time), `anonymous_id`, `user_id`,
+`session_id`, `source` (`client`|`server`), `properties`, `context` (objects).
+Send a `$identify` event carrying both `anonymous_id` and `user_id` to stitch
+pre-signup anonymous activity to an account.
 
 ## MCP
 
-Streamable HTTP на `/mcp`, тот же bearer-ключ:
+Streamable HTTP at `/mcp`, same bearer key:
 
 ```bash
 claude mcp add pulse http://localhost:8080/mcp \
   -t http -H "Authorization: Bearer $PULSE_API_KEY"
 ```
 
-Тулы: `get_schema` (что вообще есть: продукты, события, объёмы),
-`query_events` (read-only SQL по таблице `events`), `user_timeline`
-(хронология одного пользователя).
+Tools:
 
-Все колонки — строки; времена RFC3339 UTC (сортируются лексикографически),
-`properties`/`context` — JSON-строки, `date` (YYYY-MM-DD) — ключ партиции,
-фильтр по нему ускоряет сканы.
+- `get_schema` — what data exists: products, event names, volumes, time ranges
+- `query_events` — read-only SQL over the `events` table (plus the
+  `identity_links` view for anonymous↔user joins)
+- `funnel` — ordered conversion funnel computed natively in Rust (ClickHouse
+  `windowFunnel` semantics): unique users per step within a time window
+- `user_timeline` — chronological history of one user, including their
+  pre-signup anonymous events
 
-## Гарантии и границы (v1)
+All columns are strings; timestamps are RFC3339 UTC (lexicographically
+sortable), `properties`/`context` are JSON strings, `date` (YYYY-MM-DD) is the
+partition key — filter on it for fast scans.
 
-- 202 возвращается после fsync в WAL; рестарт процесса события не теряет.
-- Запросы видят WAL-хвост сразу, без ожидания компакции.
-- Read-only конструктивно: у движка запросов нет DDL/DML поверхности.
-- Один узел, телеметрия (не данные клиентов): бэкап = синк иммутабельных
-  Parquet-партиций в S3 (rclone/cron), вне скоупа бинаря.
-- Сырой IP не персистится; PII-ключи режутся denylist'ом на входе.
+## Guarantees and limits (v1)
 
-## Разработка
+- 202 is returned only after the batch is fsynced into the WAL; a process
+  restart loses nothing.
+- Queries see the WAL tail immediately — no waiting for compaction.
+- Read-only by construction: the query engine has no DDL/DML surface.
+- Raw IPs are never persisted; PII keys are stripped on ingest.
+- Single node. Backup = sync the immutable Parquet partitions to S3
+  (rclone/cron), outside the binary's scope.
+
+## Deploying
+
+`deploy/docker-compose.yml` runs the GHCR image behind an existing Traefik.
+CI builds and pushes `ghcr.io/jamakase/pulse` (`latest`, commit SHA, semver
+tags) on every push to main.
+
+## Development
 
 ```bash
-cargo test          # юниты + интеграционные (ingest → compact → query)
+cargo test          # unit + integration (ingest → compact → query)
 cargo fmt && cargo clippy --all-targets -- -D warnings
 ```

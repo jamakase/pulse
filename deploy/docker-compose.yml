@@ -1,12 +1,13 @@
-# Деплой pulse за уже работающим Traefik (staging/prod VM constractio).
+# Deploy pulse behind an already-running Traefik.
 #
-#   1. DNS: A-запись ${PULSE_HOST} → IP сервера (до первого запуска, для ACME).
-#   2. На сервере: mkdir -p /opt/pulse && cd /opt/pulse
+#   1. DNS: point an A record for ${PULSE_HOST} at the server (before first
+#      start, so ACME can issue the certificate).
+#   2. On the server: mkdir -p /opt/pulse && cd /opt/pulse
 #      cat > .env   # PULSE_API_KEY=$(openssl rand -hex 24), PULSE_HOST=…
-#   3. docker compose up -d   (образ публичный/или docker login ghcr.io)
+#   3. docker compose up -d
 #
-# Traefik из docker-compose.prod.yaml webapp'а живёт в дефолтной сети того
-# compose-проекта — она тут подключается как external (TRAEFIK_NETWORK).
+# Traefik lives in another compose project's default network — attach to it
+# as external via TRAEFIK_NETWORK.
 
 services:
   pulse:
@@ -22,7 +23,7 @@ services:
     networks: [traefik]
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.pulse.rule=Host(`${PULSE_HOST:-events.constract.io}`)"
+      - "traefik.http.routers.pulse.rule=Host(`${PULSE_HOST:-events.example.com}`)"
       - "traefik.http.routers.pulse.entrypoints=websecure"
       - "traefik.http.routers.pulse.tls=true"
       - "traefik.http.routers.pulse.tls.certresolver=letsencrypt"

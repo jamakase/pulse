@@ -9,9 +9,10 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::AppState;
 
-/// Bearer-key auth + Origin allowlist (PostHog model: the key is shared, but
-/// browser-originated requests must come from an allowed Origin).
-pub async fn require_auth(
+/// Origin allowlist (PostHog model): browser-originated requests must come
+/// from a known Origin; server-to-server requests carry no Origin and pass.
+/// Applied to everything behind the API (ingest, MCP, erasure).
+pub async fn check_origin(
     State(state): State<AppState>,
     req: Request,
     next: Next,
@@ -22,21 +23,31 @@ pub async fn require_auth(
             return Err(StatusCode::FORBIDDEN);
         }
     }
-
-    let provided = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    if !key_matches(provided, &state.config.api_key) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
     Ok(next.run(req).await)
 }
 
-fn key_matches(provided: &str, expected: &str) -> bool {
+/// Admin surface (MCP, erasure): the private `PULSE_API_KEY` only.
+pub async fn require_admin(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let provided = bearer(req.headers());
+    if !key_matches(provided, &state.config.api_key) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(req).await)
+}
+
+pub fn bearer(headers: &axum::http::HeaderMap) -> &str {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("")
+}
+
+pub fn key_matches(provided: &str, expected: &str) -> bool {
     let (p, e) = (provided.as_bytes(), expected.as_bytes());
     // Length is the only thing leaked; comparison itself is constant-time.
     p.len() == e.len() && bool::from(p.ct_eq(e))

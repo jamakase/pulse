@@ -144,11 +144,11 @@ constant-time comparison; only key prefixes in logs; TLS terminates at
 Traefik, the binary listens on plain HTTP behind the proxy; rate limit per
 write key.
 
-> v1 simplification (decided 2026-06-12): a single shared API key from env
-> (`PULSE_API_KEY`) for both ingest and MCP + the PostHog model for browser
-> sources — an allowlist of Origins (`PULSE_ALLOWED_ORIGINS`): requests with
-> an Origin outside the list are rejected, server-to-server (no Origin) passes
-> on the key. Separate write/read keys are the next iteration.
+> Implemented 2026-06-12 (revised same day to support direct browser ingest):
+> public per-product write keys via `PULSE_WRITE_KEYS=product:key,…` (header
+> or `?key=` for sendBeacon; product pinned to the key), private
+> `PULSE_API_KEY` for the admin surface (MCP, erasure; also ingests with
+> body-supplied product). Origin allowlist + CORS gate browser requests.
 
 ### 6.2 Privacy (GDPR)
 

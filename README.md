@@ -90,16 +90,45 @@ Event fields: `product` (required, `[a-zA-Z0-9_-]`), `event` (required),
 `occurred_at` (RFC3339, default = server time), `anonymous_id`, `user_id`,
 `session_id`, `source` (`client`|`server`), `properties`, `context`.
 
-Browser events should go through your app's first-party proxy (a 30-line
-route: set an httpOnly anonymous-id cookie, attach the session user_id,
-forward server-to-server). Ad-blockers can't cut it and the write key never
-reaches the browser.
+### Two kinds of keys
+
+| | write key (`PULSE_WRITE_KEYS`) | admin key (`PULSE_API_KEY`) |
+|---|---|---|
+| grants | `POST /v1/events` only | MCP, erasure, and ingest |
+| product | pinned to the key — body claims are overwritten | taken from the body |
+| secrecy | **public** — safe to ship in browser JS (the origin allowlist is the gate) | private, server-side only |
+| leak = | garbage in one product's data | full telemetry read |
+
+### Sending from the browser
+
+Two options:
+
+1. **Direct** (PostHog model): set `PULSE_ALLOWED_ORIGINS` to your app's
+   origins and send with the public write key. `?key=` exists because
+   `sendBeacon` can't set headers:
+
+   ```js
+   navigator.sendBeacon(
+     'https://events.example.com/v1/events?key=' + PULSE_WRITE_KEY,
+     new Blob([JSON.stringify([{event: 'page_view'}])], {type: 'application/json'}),
+   );
+   ```
+
+2. **First-party proxy** (recommended when you have a backend): a 30-line
+   route in your app sets an httpOnly anonymous-id cookie, attaches the
+   session user_id, and forwards server-to-server. Ad-blockers can't cut it
+   and no key ships to the browser at all.
+
+Integrity rule of thumb: decision-grade events (payments, subscriptions)
+should always be sent server-side — browser events are spoofable by design,
+in every analytics system.
 
 ## Configuration
 
 | env | default | purpose |
 |---|---|---|
-| `PULSE_API_KEY` | — (required, ≥16 chars) | bearer key for ingest and MCP |
+| `PULSE_API_KEY` | — (required, ≥16 chars) | private admin key: MCP, erasure, ingest |
+| `PULSE_WRITE_KEYS` | empty | per-product public ingest keys: `myapp:pw_…,other:pw_…` |
 | `PULSE_PORT` | `8080` | HTTP port |
 | `PULSE_DATA_DIR` | `./data` | WAL + Parquet directory (mount a volume) |
 | `PULSE_ALLOWED_ORIGINS` | empty | CSV of exact Origins allowed for browser requests; empty = any request with an Origin header is rejected |
@@ -152,8 +181,6 @@ toolchain needed.
 
 ## Roadmap
 
-- [ ] Separate write/read keys with per-product scopes
-- [ ] Direct CORS ingest (skip the first-party proxy)
 - [ ] Prometheus metrics
 - [ ] Optional `/status` page (single static HTML)
 - [ ] S3-native partition sync

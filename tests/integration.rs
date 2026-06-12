@@ -10,12 +10,17 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 const KEY: &str = "test-key-0123456789abcdef";
+const WRITE_KEY: &str = "pw_demo_0123456789abcdef";
 
 fn test_config(dir: &std::path::Path) -> Config {
     Config {
         port: 0,
         data_dir: dir.to_path_buf(),
         api_key: KEY.to_string(),
+        write_keys: vec![pulse::config::WriteKey {
+            product: "demo".to_string(),
+            key: WRITE_KEY.to_string(),
+        }],
         allowed_origins: vec!["https://app.example.com".to_string()],
         compact_interval_secs: 3600,
         ttl_days: 730,
@@ -408,4 +413,74 @@ async fn erase_user_endpoint_removes_data() {
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["user_id"], "stays");
+}
+
+#[tokio::test]
+async fn write_key_forces_product_and_cannot_read() {
+    let h = harness();
+
+    // Write key in the Authorization header: body claims another product,
+    // but the key pins it to 'demo'.
+    let app = pulse::build_router(h.state.clone());
+    let resp = app
+        .oneshot(post_events(
+            json!([{"product": "spoofed", "event": "signup", "user_id": "u1"}]),
+            Some(WRITE_KEY),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    // Write key as ?key= (the sendBeacon path), allowed browser Origin.
+    let app = pulse::build_router(h.state.clone());
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/events?key={WRITE_KEY}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ORIGIN, "https://app.example.com")
+        .body(Body::from(json!([{"event": "page_view"}]).to_string()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    // Both events landed under product=demo regardless of body claims.
+    let rows = h
+        .state
+        .engine
+        .query(
+            "SELECT product, count(*) AS n FROM events GROUP BY product",
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["product"], "demo");
+    assert_eq!(rows[0]["n"], 2);
+
+    // The public write key must NOT open the admin surface (MCP, erasure).
+    let app = pulse::build_router(h.state.clone());
+    let resp = app
+        .oneshot(
+            Request::delete("/v1/users/u1?product=demo")
+                .header(header::AUTHORIZATION, format!("Bearer {WRITE_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let app = pulse::build_router(h.state.clone());
+    let resp = app
+        .oneshot(
+            Request::post("/mcp")
+                .header(header::AUTHORIZATION, format!("Bearer {WRITE_KEY}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

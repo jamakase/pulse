@@ -1,9 +1,13 @@
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{
+    Json,
+    extract::{Query, State},
+    http::{HeaderMap, StatusCode},
+};
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{AppState, event};
+use crate::{AppState, auth, event};
 
 pub const MAX_BATCH: usize = 500;
 
@@ -14,16 +18,58 @@ pub enum Batch {
     Bare(Vec<event::IncomingEvent>),
 }
 
+#[derive(Deserialize)]
+pub struct IngestQuery {
+    /// Alternative to the Authorization header — sendBeacon can't set
+    /// headers, so browsers pass the (public) write key as ?key=…
+    pub key: Option<String>,
+}
+
+/// Admin key → trust `product` from the body. Write key → the product is
+/// derived from the key; whatever the body claims is overwritten.
+fn authenticate(
+    state: &AppState,
+    headers: &HeaderMap,
+    query_key: Option<&str>,
+) -> Result<Option<String>, StatusCode> {
+    let provided = match auth::bearer(headers) {
+        "" => query_key.unwrap_or(""),
+        bearer => bearer,
+    };
+    if provided.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if auth::key_matches(provided, &state.config.api_key) {
+        return Ok(None);
+    }
+    for wk in &state.config.write_keys {
+        if auth::key_matches(provided, &wk.key) {
+            return Ok(Some(wk.product.clone()));
+        }
+    }
+    Err(StatusCode::UNAUTHORIZED)
+}
+
 /// POST /v1/events — accepts a JSON array of events or {"events": [...]}.
 /// Returns 202 only after the batch is fsynced into the WAL.
 pub async fn ingest(
     State(state): State<AppState>,
+    Query(query): Query<IngestQuery>,
+    headers: HeaderMap,
     Json(batch): Json<Batch>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
-    let events = match batch {
+    let forced_product = authenticate(&state, &headers, query.key.as_deref())
+        .map_err(|code| bad(code, "invalid or missing API key"))?;
+
+    let mut events = match batch {
         Batch::Wrapped { events } => events,
         Batch::Bare(events) => events,
     };
+    if let Some(product) = &forced_product {
+        for ev in &mut events {
+            ev.product = Some(product.clone());
+        }
+    }
     if events.is_empty() {
         return Err(bad(StatusCode::BAD_REQUEST, "empty batch"));
     }

@@ -29,8 +29,8 @@ pub struct AppState {
 pub fn build_router(state: AppState) -> Router {
     let mcp_service = mcp::service(state.engine.clone());
 
-    let protected = Router::new()
-        .route("/v1/events", post(ingest::ingest))
+    // Admin surface: private PULSE_API_KEY only.
+    let admin = Router::new()
         .route(
             "/v1/users/{user_id}",
             axum::routing::delete(erase::erase_user),
@@ -38,7 +38,17 @@ pub fn build_router(state: AppState) -> Router {
         .nest_service("/mcp", mcp_service)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            auth::require_auth,
+            auth::require_admin,
+        ));
+
+    // Ingest authenticates inside the handler: public per-product write keys
+    // (browser-safe, gated by the origin allowlist) or the admin key.
+    let protected = Router::new()
+        .route("/v1/events", post(ingest::ingest))
+        .merge(admin)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::check_origin,
         ))
         .layer(auth::cors_layer(&state.config));
 

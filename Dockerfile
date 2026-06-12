@@ -2,8 +2,15 @@
 FROM rust:1.96-slim AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
+# Build the heavy dependencies (DataFusion et al.) in their own cached layer:
+# only Cargo.toml/lock changes invalidate it, not source edits.
+RUN mkdir -p src \
+    && echo 'fn main() {}' > src/main.rs \
+    && touch src/lib.rs \
+    && cargo build --release \
+    && rm -rf src
 COPY src ./src
-RUN cargo build --release
+RUN touch src/main.rs src/lib.rs && cargo build --release
 
 # Run
 FROM debian:bookworm-slim

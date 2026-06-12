@@ -1,0 +1,37 @@
+# Деплой pulse за уже работающим Traefik (staging/prod VM constractio).
+#
+#   1. DNS: A-запись ${PULSE_HOST} → IP сервера (до первого запуска, для ACME).
+#   2. На сервере: mkdir -p /opt/pulse && cd /opt/pulse
+#      cat > .env   # PULSE_API_KEY=$(openssl rand -hex 24), PULSE_HOST=…
+#   3. docker compose up -d   (образ публичный/или docker login ghcr.io)
+#
+# Traefik из docker-compose.prod.yaml webapp'а живёт в дефолтной сети того
+# compose-проекта — она тут подключается как external (TRAEFIK_NETWORK).
+
+services:
+  pulse:
+    image: ghcr.io/jamakase/pulse:${PULSE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      PULSE_API_KEY: ${PULSE_API_KEY:?set PULSE_API_KEY in .env}
+      PULSE_ALLOWED_ORIGINS: ${PULSE_ALLOWED_ORIGINS:-}
+      PULSE_TTL_DAYS: ${PULSE_TTL_DAYS:-730}
+      RUST_LOG: ${RUST_LOG:-pulse=info,info}
+    volumes:
+      - pulse-data:/data
+    networks: [traefik]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pulse.rule=Host(`${PULSE_HOST:-events.constract.io}`)"
+      - "traefik.http.routers.pulse.entrypoints=websecure"
+      - "traefik.http.routers.pulse.tls=true"
+      - "traefik.http.routers.pulse.tls.certresolver=letsencrypt"
+      - "traefik.http.services.pulse.loadbalancer.server.port=8080"
+
+volumes:
+  pulse-data:
+
+networks:
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:-webapp_default}

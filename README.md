@@ -96,8 +96,14 @@ Event fields: `product` (required, `[a-zA-Z0-9_-]`), `event` (required),
 |---|---|---|
 | grants | `POST /v1/events` only | MCP, erasure, and ingest |
 | product | pinned to the key — body claims are overwritten | taken from the body |
+| source | forced to `client` — a public key cannot mint trusted events | may claim `server` |
 | secrecy | **public** — safe to ship in browser JS (the origin allowlist is the gate) | private, server-side only |
 | leak = | garbage in one product's data | full telemetry read |
+
+Because only the admin key can write `source='server'`, a `WHERE source =
+'server'` filter in queries is an integrity guarantee, not a convention:
+those events were produced by your backend, full stop. Send decision-grade
+events (payments, subscriptions) server-side with the admin key.
 
 ### Sending from the browser
 

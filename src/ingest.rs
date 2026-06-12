@@ -68,6 +68,11 @@ pub async fn ingest(
     if let Some(product) = &forced_product {
         for ev in &mut events {
             ev.product = Some(product.clone());
+            // Write keys are public (they ship in browser JS), so nothing
+            // arriving on one can be trusted as server-originated. Only the
+            // private admin key may claim source='server' — which makes
+            // `WHERE source = 'server'` an integrity guarantee in queries.
+            ev.source = Some("client".to_string());
         }
     }
     if events.is_empty() {

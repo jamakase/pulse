@@ -419,12 +419,14 @@ async fn erase_user_endpoint_removes_data() {
 async fn write_key_forces_product_and_cannot_read() {
     let h = harness();
 
-    // Write key in the Authorization header: body claims another product,
-    // but the key pins it to 'demo'.
+    // Write key in the Authorization header: body claims another product and
+    // a trusted source, but the key pins product to 'demo' and demotes the
+    // event to source='client'.
     let app = pulse::build_router(h.state.clone());
     let resp = app
         .oneshot(post_events(
-            json!([{"product": "spoofed", "event": "signup", "user_id": "u1"}]),
+            json!([{"product": "spoofed", "event": "signup", "user_id": "u1",
+                    "source": "server"}]),
             Some(WRITE_KEY),
             None,
         ))
@@ -444,18 +446,20 @@ async fn write_key_forces_product_and_cannot_read() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
 
-    // Both events landed under product=demo regardless of body claims.
+    // Both events landed under product=demo regardless of body claims, and
+    // none of them could smuggle source='server' through a public key.
     let rows = h
         .state
         .engine
         .query(
-            "SELECT product, count(*) AS n FROM events GROUP BY product",
+            "SELECT product, source, count(*) AS n FROM events GROUP BY product, source",
             10,
         )
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["product"], "demo");
+    assert_eq!(rows[0]["source"], "client");
     assert_eq!(rows[0]["n"], 2);
 
     // The public write key must NOT open the admin surface (MCP, erasure).

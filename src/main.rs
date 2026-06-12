@@ -34,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
         wal,
         engine,
+        compaction_lock,
     };
     let app = pulse::build_router(state);
 

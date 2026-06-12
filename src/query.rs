@@ -83,17 +83,31 @@ impl QueryEngine {
 
     pub async fn query(&self, sql: &str, limit: usize) -> anyhow::Result<Vec<serde_json::Value>> {
         let _guard = self.compaction_lock.read().await;
+        let df = self.plan(sql).await?.limit(0, Some(limit.min(MAX_ROWS)))?;
+        let batches = tokio::time::timeout(QUERY_TIMEOUT, df.collect())
+            .await
+            .map_err(|_| anyhow::anyhow!("query timed out after {QUERY_TIMEOUT:?}"))??;
+        batches_to_json(&batches)
+    }
+
+    /// Like `query`, but returns raw Arrow batches with no row cap — the
+    /// building block for native Rust analytics (funnel folds etc.).
+    pub async fn collect(&self, sql: &str) -> anyhow::Result<Vec<RecordBatch>> {
+        let _guard = self.compaction_lock.read().await;
+        let df = self.plan(sql).await?;
+        let batches = tokio::time::timeout(QUERY_TIMEOUT, df.collect())
+            .await
+            .map_err(|_| anyhow::anyhow!("query timed out after {QUERY_TIMEOUT:?}"))??;
+        Ok(batches)
+    }
+
+    async fn plan(&self, sql: &str) -> anyhow::Result<DataFrame> {
         let ctx = self.build_ctx().await?;
         let opts = SQLOptions::new()
             .with_allow_ddl(false)
             .with_allow_dml(false)
             .with_allow_statements(false);
-        let df = ctx.sql_with_options(sql, opts).await?;
-        let df = df.limit(0, Some(limit.min(MAX_ROWS)))?;
-        let batches = tokio::time::timeout(QUERY_TIMEOUT, df.collect())
-            .await
-            .map_err(|_| anyhow::anyhow!("query timed out after {QUERY_TIMEOUT:?}"))??;
-        batches_to_json(&batches)
+        Ok(ctx.sql_with_options(sql, opts).await?)
     }
 
     async fn build_ctx(&self) -> anyhow::Result<SessionContext> {
@@ -142,6 +156,15 @@ impl QueryEngine {
             ))
             .await?;
         }
+        // Identity stitching: $identify events become a join table mapping
+        // pre-signup anonymous_ids to user_ids.
+        ctx.sql(
+            "CREATE VIEW identity_links AS SELECT product, anonymous_id, user_id, \
+             min(occurred_at) AS linked_at FROM events \
+             WHERE event = '$identify' AND anonymous_id <> '' AND user_id <> '' \
+             GROUP BY product, anonymous_id, user_id",
+        )
+        .await?;
         Ok(ctx)
     }
 }
@@ -172,6 +195,11 @@ fn has_files_with_ext(dir: &std::path::Path, ext: &str) -> bool {
         false
     }
     walk(dir, ext)
+}
+
+/// Escape a string as a SQL literal for queries we assemble server-side.
+pub fn sql_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
 }
 
 fn batches_to_json(batches: &[RecordBatch]) -> anyhow::Result<Vec<serde_json::Value>> {

@@ -11,13 +11,16 @@ use rmcp::{
 };
 use serde_json::json;
 
-use crate::query::{COLUMNS, MAX_ROWS, QueryEngine};
+use crate::funnel;
+use crate::query::{COLUMNS, MAX_ROWS, QueryEngine, sql_quote};
 
 const SCHEMA_DOC: &str = "Table `events` — one row per analytics event. Columns (all Utf8): \
 product (which app sent it), event (snake_case name), occurred_at / received_at (RFC3339 UTC, \
 lexicographically sortable; cast via occurred_at::timestamp for date math), anonymous_id, \
 user_id, session_id, source ('client'|'server'), properties (JSON string), context (JSON \
-string: utm, url, referrer), date (YYYY-MM-DD partition key — filter on it for fast scans).";
+string: utm, url, referrer), date (YYYY-MM-DD partition key — filter on it for fast scans). \
+There is also a view `identity_links(product, anonymous_id, user_id, linked_at)` built from \
+`$identify` events — join through it to stitch pre-signup anonymous activity to users.";
 
 #[derive(Clone)]
 pub struct PulseMcp {
@@ -30,6 +33,20 @@ pub struct QueryEventsParams {
     pub sql: String,
     /// Max rows to return (default 1000, hard cap 10000).
     pub limit: Option<usize>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct FunnelParams {
+    /// Product to compute the funnel for.
+    pub product: String,
+    /// Ordered, distinct event names (2..=10) forming the funnel.
+    pub steps: Vec<String>,
+    /// Conversion window: e.g. "7d", "24h", "90m". Default "7d".
+    pub window: Option<String>,
+    /// Only events at/after this RFC3339 instant or YYYY-MM-DD date.
+    pub since: Option<String>,
+    /// Only events strictly before this instant/date.
+    pub until: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -106,7 +123,14 @@ impl PulseMcp {
         Parameters(p): Parameters<UserTimelineParams>,
     ) -> Result<CallToolResult, McpError> {
         let id_filter = match (p.user_id.as_deref(), p.anonymous_id.as_deref()) {
-            (Some(u), _) if !u.is_empty() => format!("user_id = {}", sql_quote(u)),
+            // For a known user also pull their pre-signup anonymous events
+            // via identity_links.
+            (Some(u), _) if !u.is_empty() => format!(
+                "(user_id = {0} OR anonymous_id IN (SELECT anonymous_id FROM identity_links \
+                 WHERE user_id = {0} AND product = {1}))",
+                sql_quote(u),
+                sql_quote(&p.product)
+            ),
             (_, Some(a)) if !a.is_empty() => format!("anonymous_id = {}", sql_quote(a)),
             _ => {
                 return Err(McpError::invalid_params(
@@ -131,16 +155,69 @@ impl PulseMcp {
             .map_err(|e| McpError::internal_error(format!("timeline failed: {e}"), None))?;
         text_result(json!({"row_count": rows.len(), "rows": rows}))
     }
+
+    #[tool(
+        name = "funnel",
+        description = "Ordered conversion funnel computed natively in Rust (ClickHouse \
+        windowFunnel semantics): unique users reaching each step in order within the window, \
+        counted via identity-aware user_id. steps = 2..10 distinct event names in funnel order; \
+        window like '7d'/'24h'/'90m' (default '7d'); since/until are RFC3339 or YYYY-MM-DD."
+    )]
+    async fn funnel(
+        &self,
+        Parameters(p): Parameters<FunnelParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let window = funnel::parse_window(p.window.as_deref().unwrap_or("7d"))
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        let counts = funnel::compute(
+            &self.engine,
+            &p.product,
+            &p.steps,
+            window,
+            p.since.as_deref(),
+            p.until.as_deref(),
+        )
+        .await
+        .map_err(|e| McpError::invalid_params(format!("funnel failed: {e}"), None))?;
+
+        let entered = counts.first().copied().unwrap_or(0);
+        let steps: Vec<serde_json::Value> = p
+            .steps
+            .iter()
+            .zip(&counts)
+            .enumerate()
+            .map(|(i, (event, &users))| {
+                let prev = if i == 0 { entered } else { counts[i - 1] };
+                json!({
+                    "step": i + 1,
+                    "event": event,
+                    "users": users,
+                    "conversion_from_first": ratio(users, entered),
+                    "conversion_from_prev": ratio(users, prev),
+                })
+            })
+            .collect();
+        text_result(json!({
+            "product": p.product,
+            "window": p.window.as_deref().unwrap_or("7d"),
+            "entered": entered,
+            "steps": steps,
+        }))
+    }
+}
+
+fn ratio(num: u64, den: u64) -> serde_json::Value {
+    if den == 0 {
+        serde_json::Value::Null
+    } else {
+        json!((num as f64 / den as f64 * 1000.0).round() / 1000.0)
+    }
 }
 
 fn text_result(v: serde_json::Value) -> Result<CallToolResult, McpError> {
     let s = serde_json::to_string(&v)
         .map_err(|e| McpError::internal_error(format!("serialize failed: {e}"), None))?;
     Ok(CallToolResult::success(vec![Content::text(s)]))
-}
-
-fn sql_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
 }
 
 #[tool_handler]
@@ -155,9 +232,9 @@ impl ServerHandler for PulseMcp {
         info.server_info = server_info;
         info.instructions = Some(
             "Pulse is a multi-product event analytics store queried via SQL. \
-             Start with get_schema to discover products and events, then use \
-             query_events for funnels/aggregations and user_timeline to debug \
-             a single user's journey."
+             Start with get_schema to discover products and events; use funnel \
+             for ordered conversion funnels, query_events for ad-hoc SQL, and \
+             user_timeline to debug a single user's journey."
                 .to_string(),
         );
         info
@@ -174,7 +251,7 @@ pub fn service(engine: Arc<QueryEngine>) -> StreamableHttpService<PulseMcp, Loca
 
 #[cfg(test)]
 mod tests {
-    use super::sql_quote;
+    use crate::query::sql_quote;
 
     #[test]
     fn quotes_sql_literals() {

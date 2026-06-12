@@ -46,6 +46,7 @@ fn harness() -> Harness {
             config,
             wal,
             engine,
+            compaction_lock: lock.clone(),
         },
         lock,
         _tmp: tmp,
@@ -258,4 +259,153 @@ async fn ttl_drops_old_partitions() {
     compactor::enforce_ttl(&h.state.config.events_dir(), 730).unwrap();
     assert!(!old.exists());
     assert!(fresh.exists());
+}
+
+#[tokio::test]
+async fn funnel_counts_users_per_step() {
+    let h = harness();
+    let app = pulse::build_router(h.state.clone());
+    // u1 completes signup→estimate→checkout, u2 stops after estimate,
+    // u3 only signs up, u4 does steps out of order.
+    let batch = json!([
+        {"product":"demo","event":"signup","user_id":"u1","occurred_at":"2026-06-01T10:00:00Z"},
+        {"product":"demo","event":"estimate","user_id":"u1","occurred_at":"2026-06-01T11:00:00Z"},
+        {"product":"demo","event":"checkout","user_id":"u1","occurred_at":"2026-06-01T12:00:00Z"},
+        {"product":"demo","event":"signup","user_id":"u2","occurred_at":"2026-06-01T10:00:00Z"},
+        {"product":"demo","event":"estimate","user_id":"u2","occurred_at":"2026-06-02T10:00:00Z"},
+        {"product":"demo","event":"signup","user_id":"u3","occurred_at":"2026-06-01T10:00:00Z"},
+        {"product":"demo","event":"checkout","user_id":"u4","occurred_at":"2026-06-01T10:00:00Z"},
+        {"product":"demo","event":"signup","user_id":"u4","occurred_at":"2026-06-01T11:00:00Z"}
+    ]);
+    let resp = app
+        .oneshot(post_events(batch, Some(KEY), None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let steps = vec![
+        "signup".to_string(),
+        "estimate".to_string(),
+        "checkout".to_string(),
+    ];
+    let counts = pulse::funnel::compute(
+        &h.state.engine,
+        "demo",
+        &steps,
+        std::time::Duration::from_secs(7 * 86400),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(counts, vec![4, 2, 1]);
+
+    // Tight window: u2's estimate came a day later and falls out.
+    let counts = pulse::funnel::compute(
+        &h.state.engine,
+        "demo",
+        &steps,
+        std::time::Duration::from_secs(3 * 3600),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(counts, vec![4, 1, 1]);
+}
+
+#[tokio::test]
+async fn identity_links_stitch_anonymous_history() {
+    let h = harness();
+    let app = pulse::build_router(h.state.clone());
+    let batch = json!([
+        {"product":"demo","event":"page_view","anonymous_id":"a1",
+         "occurred_at":"2026-06-01T10:00:00Z","source":"client"},
+        {"product":"demo","event":"$identify","anonymous_id":"a1","user_id":"u1",
+         "occurred_at":"2026-06-01T10:05:00Z"},
+        {"product":"demo","event":"purchase","user_id":"u1",
+         "occurred_at":"2026-06-01T10:30:00Z"}
+    ]);
+    let resp = app
+        .oneshot(post_events(batch, Some(KEY), None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let links = h
+        .state
+        .engine
+        .query("SELECT * FROM identity_links", 10)
+        .await
+        .unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0]["anonymous_id"], "a1");
+    assert_eq!(links[0]["user_id"], "u1");
+
+    // The timeline-style join finds the pre-signup pageview too.
+    let rows = h
+        .state
+        .engine
+        .query(
+            "SELECT event FROM events WHERE product = 'demo' AND (user_id = 'u1' OR \
+             anonymous_id IN (SELECT anonymous_id FROM identity_links WHERE user_id = 'u1' \
+             AND product = 'demo')) ORDER BY occurred_at",
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["event"], "page_view");
+}
+
+#[tokio::test]
+async fn erase_user_endpoint_removes_data() {
+    let h = harness();
+    let app = pulse::build_router(h.state.clone());
+    let batch = json!([
+        {"product":"demo","event":"signup","user_id":"gone","occurred_at":"2026-06-01T10:00:00Z"},
+        {"product":"demo","event":"purchase","user_id":"gone","occurred_at":"2026-06-02T10:00:00Z"},
+        {"product":"demo","event":"signup","user_id":"stays","occurred_at":"2026-06-01T11:00:00Z"}
+    ]);
+    let resp = app
+        .oneshot(post_events(batch, Some(KEY), None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    // Without key → 401.
+    let app = pulse::build_router(h.state.clone());
+    let resp = app
+        .oneshot(
+            Request::delete("/v1/users/gone?product=demo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Authorized erase → both events of 'gone' deleted (incl. WAL via compact).
+    let app = pulse::build_router(h.state.clone());
+    let resp = app
+        .oneshot(
+            Request::delete("/v1/users/gone?product=demo")
+                .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["deleted"], 2);
+
+    let rows = h
+        .state
+        .engine
+        .query("SELECT user_id FROM events", 10)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["user_id"], "stays");
 }

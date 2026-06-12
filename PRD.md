@@ -71,7 +71,7 @@ free-tier функциональности; облако — чужая юрис
 - HTTP + MCP: `axum` + `rmcp` (официальный Rust MCP SDK), один порт, MCP transport — streamable HTTP на `/mcp`.
 - Хранилище: собственный WAL (NDJSON или Arrow IPC, append-only) → фоновый компактор сворачивает в Parquet, партиционирование `product=…/date=…`, zstd.
 - Запросы: Apache `datafusion` поверх Parquet + WAL-хвоста (свежие события видны в запросах сразу — union горячего хвоста и холодных партиций).
-- Скорость «обработки на Rust»: воронки/retention реализуем как **нативные UDAF** в DataFusion (аналог `windowFunnel()`/`retention()` из ClickHouse) — это и есть наши «тулы на расте, чтобы обрабатывать максимально быстро», а не пост-обработка результатов SQL на клиенте.
+- Скорость «обработки на Rust»: воронка — **нативный Rust-фолд** по Arrow-батчам внутри тула `funnel` (семантика `windowFunnel()` из ClickHouse, latest-start DP). Решение M3: фолд в туле вместо UDAF — результат и скорость те же, кода и риска меньше; UDAF добавим, если воронка понадобится внутри произвольного SQL. Retention выражается обычным SQL через `query_events`.
 - TTL: удаление партиций старше N дней (конфиг per-product).
 
 **Почему не embedded-альтернативы:** DuckDB — тянет C++ toolchain в сборку и
@@ -188,7 +188,7 @@ Auth MCP: отдельный read-ключ (Bearer). Один read-ключ ви
 - **M0** — скелет: cargo workspace, axum, конфиг, /health, Docker scratch-образ, CI (fmt/clippy/test). ~день.
 - **M1** — ingest: /v1/events, ключи, WAL + fsync, компактор в Parquet, TTL. Бенч ingest. ~2–3 дня.
 - **M2** — запросы: DataFusion над Parquet+WAL, MCP `query_events` + `get_schema`. С этого момента продукт уже полезен. ~2–3 дня.
-- **M3** — Rust-аналитика: UDAF `window_funnel`/`retention`, тулы `funnel`, `user_timeline`, identity stitching. ~2–3 дня.
+- **M3** — Rust-аналитика: тул `funnel` (нативный фолд), identity stitching (`$identify` → view `identity_links`, авто-джойн в `user_timeline`), GDPR-erasure (`DELETE /v1/users/{id}`). ✅ 2026-06-12.
 - **M4** — прод: деплой на staging VM, интеграция webapp (§9), бэкап в S3. ~1–2 дня.
 - v2-кандидаты: статус-страница, CORS-ingest, Prometheus, GDPR-delete, per-product read-скоупы.
 

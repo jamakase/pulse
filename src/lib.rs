@@ -1,7 +1,9 @@
 pub mod auth;
 pub mod compactor;
 pub mod config;
+pub mod erase;
 pub mod event;
+pub mod funnel;
 pub mod ingest;
 pub mod mcp;
 pub mod query;
@@ -19,6 +21,7 @@ pub struct AppState {
     pub config: Arc<config::Config>,
     pub wal: Arc<wal::Wal>,
     pub engine: Arc<query::QueryEngine>,
+    pub compaction_lock: Arc<tokio::sync::RwLock<()>>,
 }
 
 /// Full application router: /health is public, /v1/events and /mcp sit behind
@@ -28,6 +31,10 @@ pub fn build_router(state: AppState) -> Router {
 
     let protected = Router::new()
         .route("/v1/events", post(ingest::ingest))
+        .route(
+            "/v1/users/{user_id}",
+            axum::routing::delete(erase::erase_user),
+        )
         .nest_service("/mcp", mcp_service)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

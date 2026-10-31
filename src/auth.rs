@@ -2,7 +2,7 @@ use axum::{
     extract::{Request, State},
     http::{HeaderValue, Method, StatusCode, header},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use subtle::ConstantTimeEq;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -38,6 +38,26 @@ pub async fn require_admin(
         return Err(StatusCode::UNAUTHORIZED);
     }
     Ok(next.run(req).await)
+}
+
+/// MCP surface: the admin key, or a live OAuth access token (claude.ai /
+/// ChatGPT connectors). A 401 carries the RFC 9728 `resource_metadata`
+/// pointer that starts the connector's OAuth flow.
+pub async fn require_mcp(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let provided = bearer(req.headers());
+    let ok = key_matches(provided, &state.config.admin_key)
+        || state
+            .oauth
+            .as_deref()
+            .is_some_and(|o| !provided.is_empty() && o.verify_access(provided));
+    if ok {
+        return next.run(req).await;
+    }
+    let challenge = crate::oauth::challenge(&state, req.headers());
+    let mut resp = StatusCode::UNAUTHORIZED.into_response();
+    resp.headers_mut()
+        .insert(header::WWW_AUTHENTICATE, challenge);
+    resp
 }
 
 pub fn bearer(headers: &axum::http::HeaderMap) -> &str {

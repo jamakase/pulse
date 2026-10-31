@@ -6,12 +6,17 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.102"
 axum = "0.8.9"
+base64 = "0.22"
 chrono = { version = "0.4.45", features = ["serde"] }
 datafusion = "54.0.0"
+form_urlencoded = "1"
+getrandom = "0.3"
+hmac = "0.13"
 rmcp = { version = "1.7.0", features = ["server", "macros", "transport-streamable-http-server"] }
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
+sha2 = "0.11"
 subtle = "2.6.1"
 tokio = { version = "1.52.3", features = ["full"] }
 tower-http = { version = "0.6.11", features = ["cors"] }

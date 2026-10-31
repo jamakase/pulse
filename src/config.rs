@@ -20,6 +20,11 @@ pub struct Config {
     /// Empty = accept any Host: pulse sits behind a reverse proxy and every
     /// request is bearer-authenticated, so rebinding gains nothing here.
     pub allowed_hosts: Vec<String>,
+    /// Public base URL (e.g. `https://events.example.com`). Setting it turns
+    /// on the built-in OAuth server for claude.ai / ChatGPT connectors.
+    pub public_url: Option<String>,
+    /// Extra OAuth redirect URIs to accept (exact, or prefix ending in `*`).
+    pub oauth_redirect_uris: Vec<String>,
     pub compact_interval_secs: u64,
     pub ttl_days: i64,
     /// Lowercased property/context keys stripped on ingest (PII guard).
@@ -47,6 +52,16 @@ impl Config {
             client_keys: parse_product_keys(&env_or("PULSE_CLIENT_KEYS", ""))?,
             allowed_origins: csv(&env_or("PULSE_ALLOWED_ORIGINS", "")),
             allowed_hosts: csv(&env_or("PULSE_ALLOWED_HOSTS", "")),
+            public_url: std::env::var("PULSE_PUBLIC_URL")
+                .ok()
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty()),
+            // Not lowercased: URI paths are case-sensitive.
+            oauth_redirect_uris: env_or("PULSE_OAUTH_REDIRECT_URIS", "")
+                .split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect(),
             compact_interval_secs: env_or("PULSE_COMPACT_INTERVAL_SECS", "60").parse()?,
             ttl_days: env_or("PULSE_TTL_DAYS", "730").parse()?,
             property_denylist: csv(&env_or(

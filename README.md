@@ -114,8 +114,26 @@ Open `/apps` and pick `dashboard` (it is the entry point because it needs no
 arguments). Run pulse yourself rather than as an AgentArea-hosted container;
 secret headers are only forwarded to remote-URL servers.
 
-**claude.ai / ChatGPT custom connectors** require OAuth (static bearer
-headers are not generally available there); built-in OAuth is on the roadmap.
+**claude.ai / ChatGPT.** Their custom connectors need OAuth (static bearer
+headers aren't generally available there), so pulse ships a minimal OAuth 2.1
+server. Set `PULSE_PUBLIC_URL=https://events.example.com`, then add
+`https://events.example.com/mcp` as a custom connector (Claude: *Settings →
+Connectors → Add custom connector*; ChatGPT: *Settings → Apps → Create* in
+developer mode). A pulse page asks for the admin key once; the connector gets
+a 1-hour access token plus a rotating refresh token and never sees the key.
+
+How it stays small and safe:
+
+- **Stateless:** client ids (dynamic client registration), auth codes and
+  tokens are HMAC-signed with a key derived from `PULSE_ADMIN_KEY`, so
+  rotating the admin key revokes every connector at once. Codes and refresh
+  tokens are single-use (a tiny spent-list in the data dir).
+- **PKCE S256 required**, audience-bound access tokens, consent page that
+  can't be framed.
+- **Redirects allowlisted:** Claude's and ChatGPT's callbacks and loopback
+  (Claude Code) work out of the box; add others with
+  `PULSE_OAUTH_REDIRECT_URIS`.
+- **Tokens open MCP only.** Erasure still needs the admin key itself.
 
 ## HTTP API
 
@@ -123,6 +141,7 @@ headers are not generally available there); built-in OAuth is on the roadmap.
 POST   /v1/events                 ingest, batch ≤500 (array or {"events":[…]})
 DELETE /v1/users/{id}?product=…   GDPR Art. 17 erasure (partition rewrite)
 GET    /health                    liveness
+/.well-known/oauth-*, /oauth/*     OAuth for MCP connectors (when PULSE_PUBLIC_URL is set)
 ```
 
 Event fields: `product` (required, `[a-zA-Z0-9_-]`), `event` (required),
@@ -177,6 +196,8 @@ in every analytics system.
 | `PULSE_ADMIN_KEY` | — (required, ≥16 chars) | operator-only key: MCP + erasure (cannot ingest) |
 | `PULSE_SERVER_KEYS` | empty | per-product secret append keys: `myapp:ps_…,other:ps_…` |
 | `PULSE_CLIENT_KEYS` | empty | per-product public append keys: `myapp:pc_…` |
+| `PULSE_PUBLIC_URL` | empty | public base URL, e.g. `https://events.example.com`; enables the built-in OAuth server for claude.ai / ChatGPT connectors |
+| `PULSE_OAUTH_REDIRECT_URIS` | empty | extra OAuth redirect URIs to accept, CSV; a trailing `*` makes a prefix |
 | `PULSE_PORT` | `8080` | HTTP port |
 | `PULSE_DATA_DIR` | `./data` | WAL + Parquet directory (mount a volume) |
 | `PULSE_ALLOWED_ORIGINS` | empty | CSV of exact Origins allowed for browser requests; empty = any request with an Origin header is rejected |
@@ -229,7 +250,6 @@ toolchain needed.
 
 ## Roadmap
 
-- [ ] Built-in OAuth 2.1 (DCR + PKCE, sign-in with the admin key) for claude.ai / ChatGPT connectors
 - [ ] Prometheus metrics
 - [ ] Optional `/status` page (single static HTML)
 - [ ] S3-native partition sync

@@ -28,6 +28,8 @@ fn test_config(dir: &std::path::Path) -> Config {
         }],
         allowed_origins: vec!["https://app.example.com".to_string()],
         allowed_hosts: vec![],
+        public_url: None,
+        oauth_redirect_uris: vec![],
         compact_interval_secs: 3600,
         ttl_days: 730,
         property_denylist: vec!["email".to_string(), "phone".to_string()],
@@ -58,6 +60,7 @@ fn harness() -> Harness {
             wal,
             engine,
             compaction_lock: lock.clone(),
+            oauth: None,
         },
         lock,
         _tmp: tmp,
@@ -825,4 +828,319 @@ async fn funnel_orders_simultaneous_steps_deterministically() {
     .await
     .unwrap();
     assert_eq!(counts, vec![1, 1]);
+}
+
+fn oauth_harness() -> Harness {
+    let mut h = harness();
+    let o = pulse::oauth::OAuth::new(
+        "https://pulse.test",
+        KEY,
+        &[],
+        h.state.config.data_dir.as_path(),
+    )
+    .unwrap();
+    h.state.oauth = Some(Arc::new(o));
+    h
+}
+
+async fn send(
+    app: &axum::Router,
+    req: Request<Body>,
+) -> (StatusCode, axum::http::HeaderMap, String) {
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let (status, headers) = (resp.status(), resp.headers().clone());
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, headers, String::from_utf8_lossy(&bytes).to_string())
+}
+
+fn form(uri: &str, pairs: &[(&str, &str)]) -> Request<Body> {
+    let mut s = form_urlencoded::Serializer::new(String::new());
+    for (k, v) in pairs {
+        s.append_pair(k, v);
+    }
+    Request::post(uri)
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(s.finish()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn oauth_flow_lets_a_connector_reach_mcp() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+    use sha2::{Digest, Sha256};
+
+    let h = oauth_harness();
+    let app = pulse::build_router(h.state.clone());
+    const CB: &str = "https://claude.ai/api/mcp/auth_callback";
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#;
+    let mcp_req = |token: &str| {
+        Request::post("/mcp")
+            .header(header::HOST, "pulse.test")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "application/json, text/event-stream")
+            .body(Body::from(init))
+            .unwrap()
+    };
+
+    // 1. Unauthenticated MCP → 401 pointing at the resource metadata.
+    let (status, headers, _) = send(&app, mcp_req("")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        headers[header::WWW_AUTHENTICATE],
+        r#"Bearer resource_metadata="https://pulse.test/.well-known/oauth-protected-resource""#
+    );
+
+    // 2. Discovery.
+    let (_, _, prm) = send(
+        &app,
+        Request::get("/.well-known/oauth-protected-resource")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let prm: Value = serde_json::from_str(&prm).unwrap();
+    assert_eq!(prm["resource"], "https://pulse.test/mcp");
+    assert_eq!(prm["authorization_servers"][0], "https://pulse.test");
+    let (_, _, asm) = send(
+        &app,
+        Request::get("/.well-known/oauth-authorization-server")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let asm: Value = serde_json::from_str(&asm).unwrap();
+    assert_eq!(asm["code_challenge_methods_supported"][0], "S256");
+    assert_eq!(
+        asm["registration_endpoint"],
+        "https://pulse.test/oauth/register"
+    );
+
+    // 3. Dynamic client registration; unknown redirect hosts are refused.
+    let reg = |uris: Value| {
+        Request::post("/oauth/register")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"redirect_uris": uris, "client_name": "Claude <b>"}).to_string(),
+            ))
+            .unwrap()
+    };
+    let (status, _, _) = send(&app, reg(json!(["https://evil.example/cb"]))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, body) = send(&app, reg(json!([CB]))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let client_id = serde_json::from_str::<Value>(&body).unwrap()["client_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 4. Consent page (client name escaped), then sign-in with the admin key.
+    let verifier = "v".repeat(64);
+    let challenge = B64.encode(Sha256::digest(verifier.as_bytes()));
+    let mut q = form_urlencoded::Serializer::new(String::new());
+    let params = [
+        ("response_type", "code"),
+        ("client_id", client_id.as_str()),
+        ("redirect_uri", CB),
+        ("code_challenge", challenge.as_str()),
+        ("code_challenge_method", "S256"),
+        ("state", "xyz"),
+        ("resource", "https://pulse.test/mcp"),
+    ];
+    for (k, v) in params {
+        q.append_pair(k, v);
+    }
+    let (status, headers, page) = send(
+        &app,
+        Request::get(format!("/oauth/authorize?{}", q.finish()))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("Claude &lt;b&gt;") && page.contains("claude.ai"));
+    assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY");
+    // Chromium enforces form-action on the post-submit redirect.
+    assert!(
+        headers[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("form-action 'self' https://claude.ai;")
+    );
+
+    let mut wrong = params.to_vec();
+    wrong.push(("admin_key", "not-the-key-0000000000"));
+    let (status, _, page) = send(&app, form("/oauth/authorize", &wrong)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("Wrong key"));
+
+    let mut right = params.to_vec();
+    right.push(("admin_key", KEY));
+    let (status, headers, _) = send(&app, form("/oauth/authorize", &right)).await;
+    assert!(status.is_redirection());
+    let location = headers[header::LOCATION].to_str().unwrap().to_string();
+    assert!(location.starts_with(&format!("{CB}?code=")));
+    assert!(location.contains("state=xyz") && location.contains("iss=https%3A%2F%2Fpulse.test"));
+    let code = form_urlencoded::parse(location.split_once('?').unwrap().1.as_bytes())
+        .find(|(k, _)| k == "code")
+        .unwrap()
+        .1
+        .to_string();
+
+    // 5. Code exchange: PKCE enforced, codes single-use.
+    let exchange = |verifier: &str| {
+        form(
+            "/oauth/token",
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", CB),
+                ("client_id", &client_id),
+                ("code_verifier", verifier),
+            ],
+        )
+    };
+    let (status, _, body) = send(&app, exchange(&"w".repeat(64))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("invalid_grant"));
+    let (status, headers, body) = send(&app, exchange(&verifier)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    let tokens: Value = serde_json::from_str(&body).unwrap();
+    let access = tokens["access_token"].as_str().unwrap().to_string();
+    let refresh = tokens["refresh_token"].as_str().unwrap().to_string();
+
+    // 6. The token opens MCP — and only MCP: erasure stays admin-key only.
+    let (status, _, _) = send(&app, mcp_req(&access)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send(
+        &app,
+        Request::delete("/v1/users/u1?product=demo")
+            .header(header::AUTHORIZATION, format!("Bearer {access}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // A refresh token is not an access token.
+    let (status, headers, _) = send(&app, mcp_req(&refresh)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        headers[header::WWW_AUTHENTICATE]
+            .to_str()
+            .unwrap()
+            .contains(r#"error="invalid_token""#)
+    );
+
+    // 7. Refresh rotates: the new pair works, the old refresh token is spent.
+    let refresh_req = |t: &str| {
+        form(
+            "/oauth/token",
+            &[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", t),
+                ("client_id", &client_id),
+            ],
+        )
+    };
+    let (status, _, body) = send(&app, refresh_req(&refresh)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rotated: Value = serde_json::from_str(&body).unwrap();
+    assert_ne!(rotated["refresh_token"], tokens["refresh_token"]);
+    let (status, _, _) = send(&app, mcp_req(rotated["access_token"].as_str().unwrap())).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, body) = send(&app, refresh_req(&refresh)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("invalid_grant"));
+    // That replay means the refresh token leaked: the whole family is
+    // revoked, including the pair the legitimate rotation just produced.
+    let (status, _, _) = send(&app, mcp_req(rotated["access_token"].as_str().unwrap())).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = send(
+        &app,
+        refresh_req(rotated["refresh_token"].as_str().unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Malformed token requests get OAuth-shaped errors, not framework 4xx text.
+    let (status, _, body) = send(
+        &app,
+        Request::post("/oauth/token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("invalid_request"));
+
+    // 8. A replayed code fails AND revokes what its first exchange issued.
+    let (_, headers, _) = send(&app, form("/oauth/authorize", &right)).await;
+    let location = headers[header::LOCATION].to_str().unwrap().to_string();
+    let code2 = form_urlencoded::parse(location.split_once('?').unwrap().1.as_bytes())
+        .find(|(k, _)| k == "code")
+        .unwrap()
+        .1
+        .to_string();
+    let exchange2 = || {
+        form(
+            "/oauth/token",
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &code2),
+                ("redirect_uri", CB),
+                ("client_id", &client_id),
+                ("code_verifier", &verifier),
+            ],
+        )
+    };
+    let (status, _, body) = send(&app, exchange2()).await;
+    assert_eq!(status, StatusCode::OK);
+    let access2 = serde_json::from_str::<Value>(&body).unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, _, _) = send(&app, mcp_req(&access2)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send(&app, exchange2()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "code replay must fail");
+    let (status, _, _) = send(&app, mcp_req(&access2)).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "replay revokes the family"
+    );
+
+    // The spent-list survives a restart.
+    let reloaded = pulse::oauth::OAuth::new(
+        "https://pulse.test",
+        KEY,
+        &[],
+        h.state.config.data_dir.as_path(),
+    )
+    .unwrap();
+    let mut state = h.state.clone();
+    state.oauth = Some(Arc::new(reloaded));
+    let app2 = pulse::build_router(state);
+    let (status, _, _) = send(&app2, refresh_req(&refresh)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn oauth_is_off_without_public_url() {
+    let h = harness();
+    let app = pulse::build_router(h.state.clone());
+    let (status, _, _) = send(
+        &app,
+        Request::get("/.well-known/oauth-protected-resource")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, headers, _) =
+        send(&app, Request::post("/mcp").body(Body::from("{}")).unwrap()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(headers[header::WWW_AUTHENTICATE], "Bearer");
 }

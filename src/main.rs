@@ -30,11 +30,25 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    let oauth = match &config.public_url {
+        Some(url) => {
+            let o = pulse::oauth::OAuth::new(
+                url,
+                &config.admin_key,
+                &config.oauth_redirect_uris,
+                &config.data_dir,
+            )?;
+            tracing::info!(issuer = %url, "OAuth enabled for MCP connectors");
+            Some(Arc::new(o))
+        }
+        None => None,
+    };
     let state = AppState {
         config: config.clone(),
         wal,
         engine,
         compaction_lock,
+        oauth,
     };
     let app = pulse::build_router(state);
 

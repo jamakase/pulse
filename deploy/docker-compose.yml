@@ -18,6 +18,8 @@ services:
       PULSE_SERVER_KEYS: ${PULSE_SERVER_KEYS:-}
       PULSE_CLIENT_KEYS: ${PULSE_CLIENT_KEYS:-}
       PULSE_ALLOWED_ORIGINS: ${PULSE_ALLOWED_ORIGINS:-}
+      # https://${PULSE_HOST} turns on OAuth for claude.ai / ChatGPT connectors
+      PULSE_PUBLIC_URL: ${PULSE_PUBLIC_URL:-}
       PULSE_TTL_DAYS: ${PULSE_TTL_DAYS:-730}
       RUST_LOG: ${RUST_LOG:-pulse=info,info}
     volumes:

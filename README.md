@@ -1,6 +1,6 @@
 # pulse
 
-**Agent-first product analytics. One binary. No UI — your LLM is the dashboard.**
+**Agent-first product analytics. One binary. No web UI to host — your LLM is the dashboard.**
 
 [![ci](https://github.com/jamakase/pulse/actions/workflows/ci.yml/badge.svg)](https://github.com/jamakase/pulse/actions/workflows/ci.yml)
 [![release](https://github.com/jamakase/pulse/actions/workflows/release.yml/badge.svg)](https://github.com/jamakase/pulse/actions/workflows/release.yml)
@@ -12,7 +12,9 @@ through [MCP](https://modelcontextprotocol.io) — funnels, retention, user
 timelines, ad-hoc SQL — straight from Claude, Cursor, or any MCP client.
 There is no web UI to build, host, or learn. If the consumer of analytics is
 an agent, the whole product collapses into: fast ingest, columnar storage,
-SQL over MCP. That fits in one binary.
+SQL over MCP. That fits in one binary. When you do want to *see* the numbers,
+the same tools render interactive charts right inside the chat via
+[MCP Apps](#charts-in-the-chat-mcp-apps).
 
 ```
 products ──POST /v1/events──▶  pulse  ──WAL──▶ Parquet (product=…/date=…)
@@ -70,6 +72,7 @@ last 7 days?"*
 
 | tool | what it does |
 |---|---|
+| `dashboard` | one-call product overview: totals vs. previous period, daily users/events, top events, top `utm_source`. No required arguments |
 | `get_schema` | discover what exists: products, event names, volumes, time ranges |
 | `query_events` | read-only SQL (DataFusion dialect) over the `events` table |
 | `funnel` | ordered conversion funnel computed natively in Rust — ClickHouse `windowFunnel` semantics: unique users per step within a time window |
@@ -77,7 +80,42 @@ last 7 days?"*
 
 Identity stitching: send a `$identify {anonymous_id, user_id}` event when a
 visitor logs in; the `identity_links` view joins their anonymous history to
-the account, and `funnel`/`user_timeline` use it automatically.
+the account, and `funnel`/`user_timeline`/`dashboard` use it automatically —
+a `page_view → signup` funnel counts the anonymous visit and the signup as the
+same person.
+
+## Charts in the chat (MCP Apps)
+
+`dashboard`, `funnel`, `query_events` and `user_timeline` declare an
+[MCP Apps](https://modelcontextprotocol.io/extensions/apps/overview) view
+(`ui://pulse/app.html`). Hosts that support the extension — Claude (web and
+desktop), ChatGPT, VS Code, Goose, AgentArea — render the result as an
+interactive panel instead of raw JSON:
+
+- **Overview** — KPI tiles with deltas, daily users/events chart, top events and sources; switch 7/30/90 days
+- **Funnel** — step bars with drop-off and the biggest leak; edit steps, switch the conversion window
+- **SQL** — editable query, result table, and an automatic line (date + number) or bar (category + number) chart
+- **User** — a user's timeline grouped by session; click an event for its properties and context
+
+The view is one self-contained HTML file compiled into the binary: vanilla JS
+and inline SVG, no CDN, empty CSP. Controls inside it call pulse tools back
+through the host, so they run with the same credentials and audit trail as
+the agent. Text-only clients (Claude Code, Cursor) keep getting plain JSON.
+
+**AgentArea.** Register pulse as a remote MCP server and let AgentArea hold
+the admin key:
+
+1. `mcp_servers_create_spec(remote_url="https://events.example.com/mcp")`
+2. `mcp_servers_create(json_spec={"headers": {"Authorization": "Bearer <PULSE_ADMIN_KEY>"}})`
+   — the header is moved into AgentArea's secret store
+3. attach the instance to a project (`projects_add_mcp_instance`) or client (`clients_add_mcp_instance`)
+
+Open `/apps` and pick `dashboard` (it is the entry point because it needs no
+arguments). Run pulse yourself rather than as an AgentArea-hosted container;
+secret headers are only forwarded to remote-URL servers.
+
+**claude.ai / ChatGPT custom connectors** require OAuth (static bearer
+headers are not generally available there); built-in OAuth is on the roadmap.
 
 ## HTTP API
 
@@ -191,6 +229,7 @@ toolchain needed.
 
 ## Roadmap
 
+- [ ] Built-in OAuth 2.1 (DCR + PKCE, sign-in with the admin key) for claude.ai / ChatGPT connectors
 - [ ] Prometheus metrics
 - [ ] Optional `/status` page (single static HTML)
 - [ ] S3-native partition sync

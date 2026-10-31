@@ -6,7 +6,9 @@ pub mod event;
 pub mod funnel;
 pub mod ingest;
 pub mod mcp;
+pub mod overview;
 pub mod query;
+pub mod ui;
 pub mod wal;
 
 use std::sync::Arc;

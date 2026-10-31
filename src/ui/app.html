@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pulse</title>
+<style>
+  /* Fallbacks for the MCP Apps host style variables; a host that passes
+     hostContext.styles.variables overrides them at runtime. */
+  :root {
+    color-scheme: light dark;
+    --color-background-primary: light-dark(#ffffff, #1f1e1d);
+    --color-background-secondary: light-dark(#f5f4f1, #2a2927);
+    --color-background-tertiary: light-dark(#ebe9e4, #34322f);
+    --color-text-primary: light-dark(#1f1e1b, #ecebe7);
+    --color-text-secondary: light-dark(#6b6862, #a19e96);
+    --color-text-danger: light-dark(#b8382c, #ef7b6e);
+    --color-text-success: light-dark(#2f8a5b, #5cc08a);
+    --color-border-primary: light-dark(#e3e0d9, #3d3b37);
+    --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --pulse-accent: light-dark(#4f5fd6, #8b97ff);
+    --pulse-accent-2: light-dark(#d9773f, #f0a06c);
+    --pulse-on-accent: light-dark(#ffffff, #14131a);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--color-background-primary); color: var(--color-text-primary); font: 13.5px/1.45 var(--font-sans); padding: 14px; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  code, pre, textarea.sql { font-family: var(--font-mono); }
+  .muted { color: var(--color-text-secondary); }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .between { justify-content: space-between; }
+  .seg { display: inline-flex; background: var(--color-background-tertiary); border-radius: 8px; padding: 2px; gap: 2px; flex-wrap: wrap; }
+  .seg button { border: 0; background: transparent; color: var(--color-text-secondary); font-size: 12.5px; padding: 4px 10px; border-radius: 6px; cursor: pointer; }
+  .seg button.on { background: var(--color-background-primary); color: var(--color-text-primary); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+  .btn { border: 1px solid var(--color-border-primary); background: var(--color-background-secondary); border-radius: 7px; padding: 5px 12px; cursor: pointer; font-size: 12.5px; }
+  .btn.primary { background: var(--pulse-accent); border-color: transparent; color: var(--pulse-on-accent); font-weight: 600; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  select, input[type=text] { border: 1px solid var(--color-border-primary); background: var(--color-background-primary); border-radius: 7px; padding: 4px 8px; font-size: 12.5px; min-width: 0; }
+  header { margin-bottom: 12px; }
+  header .brand { font-weight: 600; margin-right: 4px; }
+  .title { font-weight: 600; font-size: 14px; }
+  .sub { color: var(--color-text-secondary); font-size: 12px; }
+  .head { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 12px; }
+  .error { background: color-mix(in srgb, var(--color-text-danger) 12%, transparent); color: var(--color-text-danger); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+  .empty { padding: 28px 8px; text-align: center; color: var(--color-text-secondary); }
+  #view { transition: opacity .15s; }
+  #view.loading { opacity: .45; pointer-events: none; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+  @media (max-width: 520px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+  .tile { background: var(--color-background-secondary); border-radius: 9px; padding: 9px 11px; }
+  .tile .k { font-size: 11.5px; color: var(--color-text-secondary); }
+  .tile .v { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 1px; }
+  .tile .d { font-size: 11.5px; font-variant-numeric: tabular-nums; min-height: 1em; }
+  .up { color: var(--color-text-success); } .down { color: var(--color-text-danger); }
+  .label { font-size: 12px; color: var(--color-text-secondary); margin: 14px 0 6px; font-weight: 500; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 520px) { .grid2 { grid-template-columns: 1fr; } }
+  /* charts */
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  svg .grid { stroke: var(--color-border-primary); }
+  svg .axis { fill: var(--color-text-secondary); font-size: 10px; font-family: var(--font-sans); }
+  svg .s0 { stroke: var(--pulse-accent); } svg .s1 { stroke: var(--pulse-accent-2); }
+  svg .a0 { fill: var(--pulse-accent); opacity: .1; }
+  svg .d0 { fill: var(--pulse-accent); } svg .d1 { fill: var(--pulse-accent-2); }
+  svg .cursor { stroke: var(--color-text-secondary); }
+  .chart { position: relative; }
+  .tip { position: absolute; pointer-events: none; background: var(--color-text-primary); color: var(--color-background-primary); font-size: 11.5px; padding: 4px 8px; border-radius: 6px; white-space: nowrap; transform: translate(-50%, -115%); opacity: 0; font-variant-numeric: tabular-nums; }
+  .hbar { display: grid; grid-template-columns: minmax(80px, 40%) 1fr auto; gap: 8px; align-items: center; font-size: 12.5px; margin-bottom: 5px; }
+  .hbar code { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hbar .track { height: 8px; background: var(--color-background-secondary); border-radius: 4px; overflow: hidden; }
+  .hbar .track > div { height: 100%; border-radius: 4px; background: var(--pulse-accent); }
+  .hbar.alt .track > div { background: var(--pulse-accent-2); }
+  .hbar .val { font-variant-numeric: tabular-nums; color: var(--color-text-secondary); min-width: 40px; text-align: right; }
+  /* funnel */
+  .steps { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .stepchip { display: inline-flex; align-items: center; gap: 4px; background: var(--color-background-secondary); border-radius: 6px; padding: 3px 4px 3px 8px; font-family: var(--font-mono); font-size: 12px; }
+  .stepchip button { border: 0; background: transparent; cursor: pointer; color: var(--color-text-secondary); padding: 0 4px; }
+  .fstep-top { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+  .fstep-top code { font-size: 12.5px; }
+  .fstep-top .r { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .fbar { height: 24px; background: var(--color-background-secondary); border-radius: 6px; position: relative; overflow: hidden; }
+  .fbar > div { height: 100%; background: var(--pulse-accent); border-radius: 6px; transition: width .4s cubic-bezier(.2,.7,.2,1); }
+  .fbar > span { position: absolute; top: 3px; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .fdrop { font-size: 11.5px; color: var(--color-text-danger); margin: 3px 0 9px 2px; font-variant-numeric: tabular-nums; }
+  .fdrop.worst { font-weight: 600; }
+  .callout { background: var(--color-background-secondary); border-radius: 9px; padding: 9px 12px; font-size: 12.5px; margin-top: 10px; display: flex; gap: 18px; flex-wrap: wrap; }
+  /* sql */
+  textarea.sql { width: 100%; min-height: 84px; resize: vertical; font-size: 12px; background: var(--color-background-secondary); border: 1px solid var(--color-border-primary); border-radius: 8px; padding: 8px 10px; }
+  .tablewrap { overflow: auto; max-height: 280px; border: 1px solid var(--color-border-primary); border-radius: 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { text-align: left; padding: 5px 9px; border-bottom: 1px solid var(--color-border-primary); white-space: nowrap; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+  th { font-weight: 500; color: var(--color-text-secondary); background: var(--color-background-secondary); position: sticky; top: 0; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: 0; }
+  /* timeline */
+  .session { border-left: 2px solid var(--color-border-primary); padding-left: 13px; margin: 0 0 14px 6px; position: relative; }
+  .session::before { content: ""; position: absolute; left: -7px; top: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--color-background-primary); border: 2px solid var(--pulse-accent); }
+  .s-head { font-size: 12.5px; margin-bottom: 5px; }
+  .badge { display: inline-block; font-size: 10.5px; padding: 1px 6px; border-radius: 5px; background: var(--color-background-tertiary); color: var(--color-text-secondary); margin-left: 4px; vertical-align: 1px; }
+  .badge.server { background: color-mix(in srgb, var(--color-text-success) 16%, transparent); color: var(--color-text-success); }
+  .ev { display: grid; grid-template-columns: 62px 1fr auto; gap: 8px; align-items: center; padding: 4px 6px; border-radius: 6px; cursor: pointer; font-size: 12.5px; }
+  .ev:hover { background: var(--color-background-secondary); }
+  .ev .t { color: var(--color-text-secondary); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .ev .hint { color: var(--color-text-secondary); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
+  .ev-detail { display: none; margin: 2px 6px 8px 76px; }
+  .ev-detail.open { display: block; }
+  .ev-detail pre { margin: 0; font-size: 11.5px; background: var(--color-background-secondary); padding: 8px 10px; border-radius: 7px; white-space: pre-wrap; word-break: break-word; }
+</style>
+</head>
+<body>
+<header class="row between">
+  <div class="row">
+    <span class="brand">pulse</span>
+    <select id="product" aria-label="Product"></select>
+  </div>
+  <div class="seg" id="tabs">
+    <button data-v="dashboard">Overview</button>
+    <button data-v="funnel">Funnel</button>
+    <button data-v="query">SQL</button>
+    <button data-v="timeline">User</button>
+  </div>
+</header>
+<div id="error"></div>
+<div id="view"><div class="empty">Waiting for data…</div></div>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------- host bridge
+// MCP Apps (2026-01-26): JSON-RPC 2.0 over postMessage with the host.
+const PROTOCOL = "2026-01-26";
+const pending = new Map();
+let nextId = 1;
+const send = msg => window.parent.postMessage({ jsonrpc: "2.0", ...msg }, "*");
+function rpc(method, params) {
+  const id = nextId++;
+  send({ id, method, params });
+  return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+}
+const notify = (method, params) => send({ method, params });
+
+window.addEventListener("message", ev => {
+  if (ev.source !== window.parent) return;
+  const m = ev.data;
+  if (!m || m.jsonrpc !== "2.0") return;
+  if (m.id != null && !m.method) {                       // response to our request
+    const p = pending.get(m.id);
+    if (!p) return;
+    pending.delete(m.id);
+    m.error ? p.reject(new Error(m.error.message || JSON.stringify(m.error))) : p.resolve(m.result);
+    return;
+  }
+  if (m.id != null) {                                    // request from host
+    if (m.method === "ping" || m.method === "ui/resource-teardown") send({ id: m.id, result: {} });
+    else send({ id: m.id, error: { code: -32601, message: "Method not found: " + m.method } });
+    return;
+  }
+  switch (m.method) {
+    case "ui/notifications/tool-input": onToolInput(m.params?.arguments || {}); break;
+    case "ui/notifications/tool-result": onToolResult(m.params); break;
+    case "ui/notifications/tool-cancelled": setLoading(false); showError("Tool call cancelled" + (m.params?.reason ? ": " + m.params.reason : "")); break;
+    case "ui/notifications/host-context-changed": applyHostContext(m.params); break;
+  }
+});
+
+function applyHostContext(ctx) {
+  if (!ctx) return;
+  const root = document.documentElement;
+  if (ctx.theme) root.style.colorScheme = ctx.theme;
+  for (const [k, v] of Object.entries(ctx.styles?.variables || {})) if (v) root.style.setProperty(k, v);
+}
+
+/** Decoded tool payload: structuredContent, else the JSON text block. */
+function payload(result) {
+  if (!result) throw new Error("empty tool result");
+  const text = (result.content || []).filter(c => c.type === "text").map(c => c.text).join("\n");
+  if (result.isError) throw new Error(text || "tool failed");
+  if (result.structuredContent) return result.structuredContent;
+  try { return JSON.parse(text); } catch { throw new Error(text || "unreadable tool result"); }
+}
+
+async function callTool(name, args) {
+  clearError();
+  setLoading(true);
+  try {
+    const data = payload(await rpc("tools/call", { name, arguments: args }));
+    accept(data);
+    return data;
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    setLoading(false);
+  }
+}
+
+// --------------------------------------------------------------------- state
+const S = {
+  view: "dashboard",
+  product: "",
+  products: [],
+  days: 30,
+  metric: "users",
+  dash: null,
+  funnel: null, steps: [], window: "7d",
+  query: null, sql: "",
+  timeline: null, userId: "", idKind: "user_id",
+  suggestions: [],
+};
+
+function onToolInput(args) {
+  if (args.product) S.product = args.product;
+  if (Array.isArray(args.steps)) S.steps = args.steps.slice();
+  if (args.window) S.window = args.window;
+  if (args.sql) S.sql = args.sql;
+  if (args.user_id) { S.userId = args.user_id; S.idKind = "user_id"; }
+  else if (args.anonymous_id) { S.userId = args.anonymous_id; S.idKind = "anonymous_id"; }
+  if (args.days) S.days = args.days;
+  setLoading(true);
+}
+
+function onToolResult(result) {
+  setLoading(false);
+  try { accept(payload(result)); } catch (e) { showError(e.message); }
+}
+
+/** Fold a tool payload into state and switch to its view. */
+function accept(d) {
+  switch (d.view) {
+    case "dashboard":
+      S.dash = d;
+      S.products = (d.products || []).map(p => p.product);
+      if (d.product) S.product = d.product;
+      if (d.days) S.days = d.days;
+      S.suggestions = (d.top_events || []).map(e => e.event);
+      break;
+    case "funnel":
+      S.funnel = d; S.product = d.product || S.product;
+      S.steps = (d.steps || []).map(s => s.event); S.window = d.window || S.window;
+      break;
+    case "query":
+      S.query = d; S.sql = d.sql || S.sql;
+      break;
+    case "timeline":
+      S.timeline = d; S.product = d.product || S.product;
+      if (d.user_id) { S.userId = d.user_id; S.idKind = "user_id"; }
+      else if (d.anonymous_id) { S.userId = d.anonymous_id; S.idKind = "anonymous_id"; }
+      break;
+    default:
+      return;
+  }
+  S.view = d.view;
+  render();
+  // Opened from funnel/SQL/timeline: fetch the product list + event names
+  // in the background so the picker and step suggestions work.
+  if (!S.dash && d.view !== "dashboard") prefetchDashboard();
+}
+
+let prefetching = false;
+async function prefetchDashboard() {
+  if (prefetching) return;
+  prefetching = true;
+  try {
+    const d = payload(await rpc("tools/call", { name: "dashboard", arguments: { product: S.product || undefined, days: S.days } }));
+    S.dash = d;
+    S.products = (d.products || []).map(p => p.product);
+    if (!S.product && d.product) S.product = d.product;
+    S.suggestions = (d.top_events || []).map(e => e.event);
+    render();
+  } catch { /* optional */ } finally { prefetching = false; }
+}
+
+// ------------------------------------------------------------------- helpers
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const fmt = n => (typeof n === "number" ? n : Number(n) || 0).toLocaleString("en-US");
+const pct = (a, b) => (b ? (a / b) * 100 : 0);
+const pctS = v => (v >= 10 || v === 0 ? v.toFixed(0) : v.toFixed(1)) + "%";
+const short = d => d.slice(5, 10).split("-").reverse().join(".");
+function setLoading(on) { $("#view").classList.toggle("loading", on); }
+function showError(msg) { $("#error").innerHTML = `<div class="error">${esc(msg)}</div>`; }
+function clearError() { $("#error").innerHTML = ""; }
+function delta(cur, prev) {
+  if (!prev) return "";
+  const d = ((cur - prev) / prev) * 100;
+  return `<span class="${d >= 0 ? "up" : "down"}">${d >= 0 ? "+" : "−"}${Math.abs(d).toFixed(0)}% vs prev.</span>`;
+}
+
+function lineChart(el, labels, series) {
+  const W = 600, H = 180, L = 40, R = 8, T = 10, B = 22;
+  const max = Math.max(1, ...series.flatMap(s => s.values)) * 1.08;
+  const mag = Math.pow(10, Math.floor(Math.log10(max)));
+  const top = Math.ceil(max / mag) * mag;
+  const n = labels.length;
+  const x = i => L + (n <= 1 ? (W - L - R) / 2 : (i * (W - L - R)) / (n - 1));
+  const y = v => T + (H - T - B) * (1 - v / top);
+  const tick = v => (v >= 1e6 ? (v / 1e6).toFixed(1) + "M" : v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + "k" : Math.round(v));
+  let g = "";
+  for (let k = 0; k <= 4; k++) {
+    const v = (top * k) / 4;
+    g += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text class="axis" x="${L - 6}" y="${y(v) + 3.5}" text-anchor="end">${tick(v)}</text>`;
+  }
+  const every = Math.ceil(n / 7);
+  labels.forEach((l, i) => { if (i % every === 0 || i === n - 1) g += `<text class="axis" x="${x(i)}" y="${H - 5}" text-anchor="middle">${esc(l)}</text>`; });
+  series.forEach((s, si) => {
+    const pts = s.values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+    if (si === 0 && n > 1) g += `<path class="a0" d="M${x(0)},${y(0)} L${pts.join(" L")} L${x(n - 1)},${y(0)} Z"/>`;
+    g += `<polyline class="s${si}" points="${pts.join(" ")}" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    if (n === 1) g += `<circle class="d${si}" cx="${x(0)}" cy="${y(s.values[0])}" r="3.5"/>`;
+  });
+  g += `<line class="cursor" x1="0" x2="0" y1="${T}" y2="${H - B}" stroke-dasharray="3 3" opacity="0"/>`;
+  series.forEach((_, si) => (g += `<circle class="d${si} dot${si}" r="3.5" opacity="0"/>`));
+  el.innerHTML = `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img">${g}<rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"/></svg><div class="tip"></div></div>`;
+  const svg = $("svg", el), tip = $(".tip", el), cur = $(".cursor", el);
+  svg.addEventListener("mousemove", e => {
+    const r = svg.getBoundingClientRect();
+    const sx = ((e.clientX - r.left) / r.width) * W;
+    const i = Math.max(0, Math.min(n - 1, Math.round(((sx - L) / (W - L - R)) * (n - 1))));
+    cur.setAttribute("x1", x(i)); cur.setAttribute("x2", x(i)); cur.setAttribute("opacity", 1);
+    series.forEach((s, si) => { const d = $(".dot" + si, el); d.setAttribute("cx", x(i)); d.setAttribute("cy", y(s.values[i])); d.setAttribute("opacity", 1); });
+    tip.innerHTML = `<b>${esc(labels[i])}</b> · ` + series.map(s => `${esc(s.name)}: ${fmt(s.values[i])}`).join(" · ");
+    tip.style.left = (x(i) / W) * 100 + "%";
+    tip.style.top = (y(Math.max(...series.map(s => s.values[i]))) / H) * r.height + "px";
+    tip.style.opacity = 1;
+  });
+  svg.addEventListener("mouseleave", () => { tip.style.opacity = 0; cur.setAttribute("opacity", 0); series.forEach((_, si) => $(".dot" + si, el).setAttribute("opacity", 0)); });
+}
+
+function hbars(rows, alt) {
+  if (!rows.length) return `<div class="muted">No data</div>`;
+  const max = Math.max(...rows.map(r => r[1]), 1);
+  return rows.map(([k, v]) => `<div class="hbar ${alt ? "alt" : ""}"><code title="${esc(k)}">${esc(k)}</code><div class="track"><div style="width:${pct(v, max)}%"></div></div><span class="val">${fmt(v)}</span></div>`).join("");
+}
+
+// -------------------------------------------------------------------- views
+const VIEWS = {
+  dashboard(el) {
+    const d = S.dash;
+    if (!d) { el.innerHTML = `<div class="empty"><button class="btn primary" id="load">Load overview</button></div>`; $("#load", el).onclick = () => callTool("dashboard", { product: S.product || undefined, days: S.days }); return; }
+    if (!d.product) { el.innerHTML = `<div class="empty">No events yet. Send some to <code>POST /v1/events</code>.</div>`; return; }
+    const t = d.totals, p = d.previous;
+    el.innerHTML = `<div class="head"><div><div class="title">Overview · ${esc(d.product)}</div><div class="sub">${short(d.since)} — ${short(d.until)} (UTC), compared with the previous ${d.days} days</div></div>
+      <div class="seg" id="days">${[7, 30, 90].map(n => `<button data-n="${n}" class="${n === d.days ? "on" : ""}">${n}d</button>`).join("")}</div></div>
+      <div class="tiles">
+        <div class="tile"><div class="k">Events</div><div class="v">${fmt(t.events)}</div><div class="d">${delta(t.events, p.events)}</div></div>
+        <div class="tile"><div class="k">Unique users</div><div class="v">${fmt(t.users)}</div><div class="d">${delta(t.users, p.users)}</div></div>
+        <div class="tile"><div class="k">Avg DAU</div><div class="v">${fmt(t.avg_dau)}</div><div class="d"></div></div>
+        <div class="tile"><div class="k">Sessions</div><div class="v">${fmt(t.sessions)}</div><div class="d">${delta(t.sessions, p.sessions)}</div></div>
+      </div>
+      <div class="row between"><div class="label" style="margin:0">Per day</div><div class="seg" id="metric"><button data-m="users" class="${S.metric === "users" ? "on" : ""}">Users</button><button data-m="events" class="${S.metric === "events" ? "on" : ""}">Events</button></div></div>
+      <div id="daily"></div>
+      <div class="grid2">
+        <div><div class="label">Top events</div>${hbars((d.top_events || []).map(e => [e.event, e.events]))}</div>
+        <div><div class="label">Sources · utm_source, users</div>${hbars((d.top_sources || []).map(s => [s.source, s.users]), true)}</div>
+      </div>`;
+    lineChart($("#daily", el), d.daily.map(r => short(r.date)), [{ name: S.metric === "users" ? "Users" : "Events", values: d.daily.map(r => r[S.metric]) }]);
+    $("#days", el).onclick = e => { const n = +e.target.dataset.n; if (n) callTool("dashboard", { product: d.product, days: n }); };
+    $("#metric", el).onclick = e => { const m = e.target.dataset.m; if (m) { S.metric = m; render(); } };
+  },
+
+  funnel(el) {
+    const f = S.funnel;
+    const sugg = S.suggestions.filter(s => !S.steps.includes(s));
+    let h = `<div class="head"><div><div class="title">Funnel · ${esc(S.product || "—")}</div><div class="sub">Unique users completing steps in order within the window</div></div>
+      <div class="seg" id="win">${["24h", "7d", "30d"].map(w => `<button data-w="${w}" class="${w === S.window ? "on" : ""}">${w}</button>`).join("")}</div></div>
+      <div class="steps">${S.steps.map((s, i) => `<span class="stepchip">${i + 1}. ${esc(s)}<button data-rm="${i}" aria-label="Remove">×</button></span>`).join("")}
+        <input type="text" id="addstep" list="evlist" placeholder="+ add step" style="width:140px">
+        <datalist id="evlist">${sugg.map(s => `<option value="${esc(s)}">`).join("")}</datalist>
+        <button class="btn primary" id="run" ${S.steps.length < 2 ? "disabled" : ""}>Run</button></div>`;
+    const fresh = f && f.product === S.product && f.window === S.window && f.steps.map(s => s.event).join() === S.steps.join();
+    if (f && fresh) {
+      const st = f.steps, entered = f.entered || 0;
+      let worst = 0, worstI = -1;
+      st.forEach((s, i) => { if (i) { const d = st[i - 1].users ? 1 - s.users / st[i - 1].users : 0; if (d > worst) { worst = d; worstI = i; } } });
+      st.forEach((s, i) => {
+        const w = pct(s.users, entered), inside = w >= 16;
+        h += `<div class="fstep-top"><span><span class="muted">${i + 1}</span> <code>${esc(s.event)}</code></span><span class="r">${pctS(w)}${i ? ` <span class="muted">· ${pctS(pct(s.users, st[i - 1].users))} of prev.</span>` : ""}</span></div>
+          <div class="fbar"><div style="width:${Math.max(w, 0.5)}%"></div><span style="${inside ? "left:8px;color:var(--pulse-on-accent)" : `left:calc(${Math.max(w, 0.5)}% + 8px)`}">${fmt(s.users)}</span></div>`;
+        if (i < st.length - 1) {
+          const lost = s.users - st[i + 1].users;
+          h += `<div class="fdrop ${i + 1 === worstI ? "worst" : ""}">↓ ${fmt(lost)} dropped (${pctS(pct(lost, s.users))})${i + 1 === worstI ? " — biggest drop" : ""}</div>`;
+        }
+      });
+      const last = st[st.length - 1]?.users || 0;
+      h += `<div class="callout"><span>Overall conversion <b>${pctS(pct(last, entered))}</b></span><span>Entered <b>${fmt(entered)}</b></span>${worstI > 0 ? `<span>Biggest drop <b>${esc(st[worstI - 1].event)} → ${esc(st[worstI].event)}</b></span>` : ""}</div>`;
+      h += `<div class="sub" style="margin-top:6px">${f.since || f.until ? `Period: ${esc(f.since || "…")} — ${esc(f.until || "now")}` : "All time"}</div>`;
+    } else {
+      h += `<div class="empty">${S.steps.length < 2 ? "Add at least two steps (event names) in order." : "Press Run to compute the funnel."}</div>`;
+    }
+    el.innerHTML = h;
+    const run = () => S.steps.length >= 2 && callTool("funnel", { product: S.product, steps: S.steps, window: S.window, since: f?.since || undefined, until: f?.until || undefined });
+    $("#run", el).onclick = run;
+    $("#win", el).onclick = e => { const w = e.target.dataset.w; if (w) { S.window = w; render(); run(); } };
+    el.querySelectorAll("[data-rm]").forEach(b => (b.onclick = () => { S.steps.splice(+b.dataset.rm, 1); render(); }));
+    const add = $("#addstep", el);
+    const commit = () => { const v = add.value.trim(); if (v && !S.steps.includes(v) && S.steps.length < 10) { S.steps.push(v); render(); $("#addstep").focus(); } };
+    add.addEventListener("keydown", e => { if (e.key === "Enter") commit(); });
+    add.addEventListener("change", commit);
+  },
+
+  query(el) {
+    const q = S.query;
+    if (!S.sql) S.sql = `SELECT date, count(*) AS events\nFROM events\nWHERE product = '${(S.product || "myapp").replace(/'/g, "''")}'\nGROUP BY date ORDER BY date`;
+    el.innerHTML = `<div class="head"><div><div class="title">SQL</div><div class="sub">Read-only DataFusion SQL over <code>events</code> · ⌘/Ctrl+Enter to run</div></div>
+      <button class="btn primary" id="run">Run</button></div>
+      <textarea class="sql" id="sql" spellcheck="false">${esc(S.sql)}</textarea>
+      <div id="out"></div>`;
+    const ta = $("#sql", el);
+    const run = () => { S.sql = ta.value; if (S.sql.trim()) callTool("query_events", { sql: S.sql }); };
+    $("#run", el).onclick = run;
+    ta.addEventListener("input", () => (S.sql = ta.value));
+    ta.addEventListener("keydown", e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); run(); } });
+    if (!q) return;
+    const out = $("#out", el), rows = q.rows || [];
+    if (!rows.length) { out.innerHTML = `<div class="empty">0 rows</div>`; return; }
+    // Arrow's JSON writer omits null fields, so take the union of keys.
+    const cols = [...new Set(rows.flatMap(r => Object.keys(r)))];
+    const isNum = c => rows.every(r => r[c] == null || typeof r[c] === "number");
+    const isDate = c => rows.every(r => typeof r[c] === "string" && /^\d{4}-\d{2}-\d{2}/.test(r[c]));
+    const num = cols.find(c => isNum(c)), date = cols.find(c => isDate(c)), cat = cols.find(c => !isNum(c) && !isDate(c));
+    let mode = "table";
+    if (num && date && rows.length > 1) mode = "line"; else if (num && cat && rows.length <= 30) mode = "bar";
+    const shown = rows.slice(0, 500);
+    out.innerHTML = `<div class="sub" style="margin:10px 0 6px">${fmt(q.row_count)} rows${mode === "line" ? ` · line: <code>${esc(num)}</code> by <code>${esc(date)}</code>` : mode === "bar" ? ` · bars: <code>${esc(num)}</code> by <code>${esc(cat)}</code>` : ""}${rows.length > shown.length ? " · showing first 500" : ""}</div>
+      <div id="chart" style="margin-bottom:10px"></div>
+      <div class="tablewrap"><table><thead><tr>${cols.map(c => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${shown.map(r => `<tr>${cols.map(c => { const v = r[c]; const n = typeof v === "number"; return `<td class="${n ? "num" : ""}" title="${esc(typeof v === "object" ? JSON.stringify(v) : v)}">${esc(n ? fmt(v) : typeof v === "object" && v !== null ? JSON.stringify(v) : v)}</td>`; }).join("")}</tr>`).join("")}</tbody></table></div>`;
+    if (mode === "line") {
+      const sorted = rows.slice().sort((a, b) => String(a[date]).localeCompare(String(b[date])));
+      lineChart($("#chart", el), sorted.map(r => short(r[date])), [{ name: num, values: sorted.map(r => r[num] || 0) }]);
+    } else if (mode === "bar") {
+      $("#chart", el).innerHTML = hbars(rows.map(r => [r[cat] ?? "(null)", r[num] || 0]));
+    }
+  },
+
+  timeline(el) {
+    const t = S.timeline;
+    el.innerHTML = `<div class="head"><div><div class="title">User timeline · ${esc(S.product || "—")}</div><div class="sub">Includes pre-signup anonymous activity linked via <code>$identify</code></div></div>
+      <div class="row"><select id="kind" aria-label="Id type"><option value="user_id" ${S.idKind === "user_id" ? "selected" : ""}>user_id</option><option value="anonymous_id" ${S.idKind === "anonymous_id" ? "selected" : ""}>anonymous_id</option></select><input type="text" id="uid" placeholder="id" value="${esc(S.userId)}" style="width:150px"><button class="btn primary" id="run">Show</button></div></div><div id="out"></div>`;
+    const inp = $("#uid", el);
+    $("#kind", el).onchange = e => (S.idKind = e.target.value);
+    const run = () => { S.userId = inp.value.trim(); if (S.userId && S.product) callTool("user_timeline", { product: S.product, [S.idKind]: S.userId }); };
+    $("#run", el).onclick = run;
+    inp.addEventListener("keydown", e => { if (e.key === "Enter") run(); });
+    if (!t || t.product !== S.product) return;
+    const rows = t.rows || [], out = $("#out", el);
+    if (!rows.length) { out.innerHTML = `<div class="empty">No events for this user.</div>`; return; }
+    const sessions = [];
+    for (const r of rows) {
+      const sid = r.session_id || "";
+      const last = sessions[sessions.length - 1];
+      if (last && last.id === sid) last.rows.push(r); else sessions.push({ id: sid, rows: [r] });
+    }
+    const parse = s => { try { return JSON.parse(s || "{}"); } catch { return s; } };
+    out.innerHTML = `<div class="sub" style="margin-bottom:10px">${fmt(rows.length)} events · ${sessions.length} session${sessions.length === 1 ? "" : "s"} · click an event for details</div>` +
+      sessions.map((s, si) => {
+        const first = s.rows[0].occurred_at || "";
+        const utm = parse(s.rows[0].context)?.utm_source;
+        return `<div class="session"><div class="s-head"><b>${s.id ? "Session " + esc(s.id) : "No session"}</b> <span class="muted">· ${esc(first.slice(0, 10))} · ${s.rows.length} events${utm ? " · utm: " + esc(utm) : ""}</span></div>` +
+          s.rows.map((r, ei) => {
+            const props = parse(r.properties), ctx = parse(r.context);
+            const hint = typeof props === "object" ? Object.entries(props).slice(0, 2).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(", ") : "";
+            return `<div class="ev" data-id="${si}-${ei}"><span class="t">${esc((r.occurred_at || "").slice(11, 19))}</span><span><code>${esc(r.event)}</code><span class="badge ${r.source === "server" ? "server" : ""}">${esc(r.source || "")}</span></span><span class="hint">${esc(hint)}</span></div>
+              <div class="ev-detail" id="d-${si}-${ei}"><pre>${esc(JSON.stringify({ occurred_at: r.occurred_at, properties: props, context: ctx }, null, 2))}</pre></div>`;
+          }).join("") + `</div>`;
+      }).join("");
+    out.querySelectorAll(".ev").forEach(e => (e.onclick = () => $("#d-" + e.dataset.id, out).classList.toggle("open")));
+  },
+};
+
+function renderHeader() {
+  const sel = $("#product");
+  const list = S.products.includes(S.product) || !S.product ? S.products : [S.product, ...S.products];
+  sel.innerHTML = list.length ? list.map(p => `<option ${p === S.product ? "selected" : ""}>${esc(p)}</option>`).join("") : `<option>${esc(S.product || "—")}</option>`;
+  [...$("#tabs").children].forEach(b => b.classList.toggle("on", b.dataset.v === S.view));
+}
+function render() {
+  renderHeader();
+  VIEWS[S.view]($("#view"));
+}
+
+$("#tabs").addEventListener("click", e => {
+  const v = e.target.dataset.v;
+  if (!v) return;
+  S.view = v;
+  clearError();
+  render();
+  if (v === "dashboard" && (!S.dash || S.dash.product !== S.product)) callTool("dashboard", { product: S.product || undefined, days: S.days });
+});
+$("#product").addEventListener("change", e => {
+  S.product = e.target.value;
+  S.funnel = null; S.timeline = null;
+  if (S.view === "dashboard") callTool("dashboard", { product: S.product, days: S.days }); else render();
+});
+
+// --------------------------------------------------------------------- boot
+(async () => {
+  if (window.parent === window) {
+    $("#view").innerHTML = `<div class="empty">This view runs inside an MCP Apps host (Claude, ChatGPT, AgentArea…).</div>`;
+    return;
+  }
+  try {
+    const init = await rpc("ui/initialize", {
+      protocolVersion: PROTOCOL,
+      appInfo: { name: "pulse", version: "0.2.0" },
+      appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+    });
+    applyHostContext(init?.hostContext);
+  } catch (e) {
+    showError("Host handshake failed: " + e.message);
+  }
+  notify("ui/notifications/initialized", {});
+  renderHeader();
+  new ResizeObserver(() => {
+    const r = document.documentElement.getBoundingClientRect();
+    notify("ui/notifications/size-changed", { width: Math.ceil(r.width), height: Math.ceil(r.height) });
+  }).observe(document.documentElement);
+})();
+</script>
+</body>
+</html>

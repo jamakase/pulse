@@ -568,3 +568,261 @@ async fn mcp_accepts_public_host_header() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn dashboard_summarizes_a_product() {
+    let h = harness();
+    let today = chrono::Utc::now().date_naive();
+    let day = |n: u64| format!("{}T12:00:00Z", today - chrono::Days::new(n));
+    let app = pulse::build_router(h.state.clone());
+    let resp = app
+        .oneshot(post_events(
+            json!([
+                {"event": "page_view", "anonymous_id": "a1", "occurred_at": day(0),
+                 "context": {"utm_source": "telegram"}},
+                {"event": "$identify", "anonymous_id": "a1", "user_id": "u1", "occurred_at": day(0)},
+                {"event": "signup", "user_id": "u1", "session_id": "s1", "occurred_at": day(0),
+                 "context": {"utm_source": "telegram"}},
+                {"event": "page_view", "anonymous_id": "a9", "occurred_at": day(1)},
+                {"event": "page_view", "user_id": "u2", "session_id": "s2", "occurred_at": day(2)},
+                {"event": "page_view", "user_id": "u3", "occurred_at": day(9)},
+                {"event": "page_view", "user_id": "u4", "occurred_at": day(40)},
+            ]),
+            Some(SERVER_KEY),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let d = pulse::overview::dashboard(&h.state.engine, None, 7, today)
+        .await
+        .unwrap();
+    assert_eq!(d["view"], "dashboard");
+    assert_eq!(d["product"], "demo");
+    assert_eq!(d["daily"].as_array().unwrap().len(), 7, "zero-filled days");
+    assert_eq!(d["totals"]["events"], 5);
+    // a1 was $identify-linked to u1 → one person; plus a9 and u2.
+    assert_eq!(d["totals"]["users"], 3);
+    assert_eq!(d["totals"]["sessions"], 2);
+    assert_eq!(d["previous"]["events"], 1); // day 9 only; day 40 is out
+    assert_eq!(d["top_events"][0]["event"], "page_view");
+    assert!(
+        d["top_events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["event"] != "$identify"),
+        "internal events are not 'top events'"
+    );
+    let sources = d["top_sources"].as_array().unwrap();
+    assert_eq!(sources[0]["source"], "(direct)"); // a9, u2
+    assert_eq!(sources[0]["users"], 2);
+    assert!(
+        sources
+            .iter()
+            .any(|s| s["source"] == "telegram" && s["users"] == 1)
+    );
+    let last = d["daily"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["date"], today.to_string());
+    assert_eq!(last["events"], 3);
+    assert_eq!(last["users"], 1); // a1 + u1 stitched
+
+    // Empty instance: no product to pick, no error.
+    let empty = harness();
+    let d = pulse::overview::dashboard(&empty.state.engine, None, 30, today)
+        .await
+        .unwrap();
+    assert_eq!(d["product"], Value::Null);
+}
+
+/// One JSON-RPC exchange over streamable HTTP; returns (session id, result).
+async fn mcp_call(
+    app: &axum::Router,
+    session: Option<&str>,
+    body: Value,
+) -> (Option<String>, Value) {
+    let mut req = Request::post("/mcp")
+        .header(header::HOST, "events.example.com")
+        .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream");
+    if let Some(s) = session {
+        req = req.header("mcp-session-id", s);
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    if !status.is_success() {
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        panic!("{} on {body}: {}", status, String::from_utf8_lossy(&bytes));
+    }
+    let sid = resp
+        .headers()
+        .get("mcp-session-id")
+        .map(|v| v.to_str().unwrap().to_string());
+    if body.get("id").is_none() {
+        return (sid, Value::Null); // notification: 202, no body
+    }
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    let msg = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+        .find(|m| m.get("id").is_some())
+        .unwrap_or_else(|| panic!("no JSON-RPC response in {text}"));
+    (sid, msg)
+}
+
+#[tokio::test]
+async fn mcp_serves_the_app_view() {
+    let h = harness();
+    // One router = one MCP session manager, as in production.
+    let app = pulse::build_router(h.state.clone());
+    let (sid, init) = mcp_call(
+        &app,
+        None,
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2025-06-18","capabilities":{},
+            "clientInfo":{"name":"t","version":"0"}}}),
+    )
+    .await;
+    let sid = sid.expect("stateful session");
+    let caps = &init["result"]["capabilities"];
+    assert_eq!(
+        caps["extensions"]["io.modelcontextprotocol/ui"]["mimeTypes"][0],
+        "text/html;profile=mcp-app"
+    );
+    assert!(caps["resources"].is_object());
+    mcp_call(
+        &app,
+        Some(&sid),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    )
+    .await;
+
+    let (_, tools) = mcp_call(
+        &app,
+        Some(&sid),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+    )
+    .await;
+    let tools = tools["result"]["tools"].as_array().unwrap().clone();
+    for name in ["dashboard", "funnel", "query_events", "user_timeline"] {
+        let t = tools.iter().find(|t| t["name"] == name).unwrap();
+        assert_eq!(
+            t["_meta"]["ui"]["resourceUri"], "ui://pulse/app.html",
+            "{name}"
+        );
+    }
+    // Entry point for hosts that hide tools with required args (AgentArea /apps).
+    let dash = tools.iter().find(|t| t["name"] == "dashboard").unwrap();
+    assert!(
+        dash["inputSchema"]["required"]
+            .as_array()
+            .is_none_or(|r| r.is_empty())
+    );
+    let schema = tools.iter().find(|t| t["name"] == "get_schema").unwrap();
+    assert!(schema.get("_meta").is_none());
+
+    let (_, res) = mcp_call(
+        &app,
+        Some(&sid),
+        json!({"jsonrpc":"2.0","id":3,"method":"resources/read",
+               "params":{"uri":"ui://pulse/app.html"}}),
+    )
+    .await;
+    let content = &res["result"]["contents"][0];
+    assert_eq!(content["mimeType"], "text/html;profile=mcp-app");
+    assert!(content["text"].as_str().unwrap().contains("ui/initialize"));
+
+    let (_, call) = mcp_call(
+        &app,
+        Some(&sid),
+        json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+               "params":{"name":"dashboard","arguments":{}}}),
+    )
+    .await;
+    assert_eq!(call["result"]["structuredContent"]["view"], "dashboard");
+    assert!(call["result"]["content"][0]["text"].is_string());
+
+    // Execution failures are tool results with isError, not protocol errors:
+    // the model can read them and a view gets something to render.
+    let (_, bad) = mcp_call(
+        &app,
+        Some(&sid),
+        json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
+               "params":{"name":"query_events","arguments":{"sql":"SELEC nope"}}}),
+    )
+    .await;
+    assert!(bad.get("error").is_none(), "{bad}");
+    assert_eq!(bad["result"]["isError"], true);
+    assert!(
+        bad["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("query failed")
+    );
+}
+
+#[tokio::test]
+async fn funnel_stitches_anonymous_entry_steps() {
+    // The natural top-of-funnel step (page_view) happens before signup, under
+    // an anonymous_id. Without stitching such a funnel is always empty.
+    let h = harness();
+    let app = pulse::build_router(h.state.clone());
+    let batch = json!([
+        {"event":"page_view","anonymous_id":"a1","occurred_at":"2026-06-01T10:00:00Z"},
+        {"event":"$identify","anonymous_id":"a1","user_id":"u1","occurred_at":"2026-06-01T10:05:00Z"},
+        {"event":"signup","user_id":"u1","occurred_at":"2026-06-01T10:05:00Z"},
+        {"event":"page_view","anonymous_id":"a2","occurred_at":"2026-06-01T11:00:00Z"}
+    ]);
+    let resp = app
+        .oneshot(post_events(batch, Some(SERVER_KEY), None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let counts = pulse::funnel::compute(
+        &h.state.engine,
+        "demo",
+        &["page_view".to_string(), "signup".to_string()],
+        std::time::Duration::from_secs(86400),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(counts, vec![2, 1]); // a1→u1 converts, a2 bounces
+}
+
+#[tokio::test]
+async fn funnel_orders_simultaneous_steps_deterministically() {
+    // A backend often emits consecutive steps in one batch with the same
+    // timestamp; they must count in funnel order, every time.
+    let h = harness();
+    let app = pulse::build_router(h.state.clone());
+    let batch = json!([
+        {"event":"estimate","user_id":"u1","occurred_at":"2026-06-01T10:00:00Z"},
+        {"event":"signup","user_id":"u1","occurred_at":"2026-06-01T10:00:00Z"}
+    ]);
+    let resp = app
+        .oneshot(post_events(batch, Some(SERVER_KEY), None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let counts = pulse::funnel::compute(
+        &h.state.engine,
+        "demo",
+        &["signup".to_string(), "estimate".to_string()],
+        std::time::Duration::from_secs(3600),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(counts, vec![1, 1]);
+}

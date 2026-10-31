@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use datafusion::arrow::array::StringArray;
 
-use crate::query::{QueryEngine, sql_quote};
+use crate::query::{QueryEngine, sql_quote, stitched_events};
 
 /// Per-step unique user counts for an ordered funnel, ClickHouse
 /// `windowFunnel` semantics: a user reaches step k if events matching steps
@@ -37,10 +37,12 @@ pub async fn compute(
         .map(|s| sql_quote(s))
         .collect::<Vec<_>>()
         .join(", ");
+    // Identity-stitched: an anonymous page_view before signup belongs to the
+    // same funnel run as the account's later steps.
     let mut sql = format!(
-        "SELECT user_id, occurred_at, event FROM events \
-         WHERE product = {} AND user_id <> '' AND event IN ({in_list})",
-        sql_quote(product)
+        "SELECT uid, occurred_at, event FROM {} s \
+         WHERE uid IS NOT NULL AND event IN ({in_list})",
+        stitched_events(product)
     );
     // RFC3339-UTC strings compare lexicographically, so bare dates like
     // '2026-06-01' work as prefixes too.
@@ -50,7 +52,17 @@ pub async fn compute(
     if let Some(until) = until {
         sql.push_str(&format!(" AND occurred_at < {}", sql_quote(until)));
     }
-    sql.push_str(" ORDER BY user_id, occurred_at");
+    // Simultaneous events (same millisecond) sort in funnel order, so the
+    // result is deterministic and a batch like {signup, estimate} counts.
+    let step_rank = steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| format!("WHEN {} THEN {i}", sql_quote(s)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    sql.push_str(&format!(
+        " ORDER BY uid, occurred_at, CASE event {step_rank} END"
+    ));
 
     let batches = engine.collect(&sql).await?;
     let window_ms = i64::try_from(window.as_millis()).unwrap_or(i64::MAX);
@@ -61,7 +73,7 @@ pub async fn compute(
             .column(0)
             .as_any()
             .downcast_ref::<StringArray>()
-            .expect("user_id is Utf8");
+            .expect("uid is Utf8");
         let times = batch
             .column(1)
             .as_any()

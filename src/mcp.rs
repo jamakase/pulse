@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
 use rmcp::{
-    ErrorData as McpError, ServerHandler,
+    ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
+    model::{
+        CallToolResult, Content, Implementation, ListResourcesResult, PaginatedRequestParams,
+        ReadResourceRequestParams, ReadResourceResult, ServerCapabilities, ServerInfo,
+    },
+    service::RequestContext,
     tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -11,8 +15,8 @@ use rmcp::{
 };
 use serde_json::json;
 
-use crate::funnel;
 use crate::query::{COLUMNS, MAX_ROWS, QueryEngine, sql_quote};
+use crate::{funnel, overview, ui};
 
 const SCHEMA_DOC: &str = "Table `events` — one row per analytics event. Columns (all Utf8): \
 product (which app sent it), event (snake_case name), occurred_at / received_at (RFC3339 UTC, \
@@ -33,6 +37,14 @@ pub struct QueryEventsParams {
     pub sql: String,
     /// Max rows to return (default 1000, hard cap 10000).
     pub limit: Option<usize>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DashboardParams {
+    /// Product to show; defaults to the one with the most events.
+    pub product: Option<String>,
+    /// Period length in days, today inclusive (default 30, max 365).
+    pub days: Option<u32>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -74,19 +86,50 @@ impl PulseMcp {
         description = "Run a read-only SQL SELECT (DataFusion dialect) over the `events` table. \
         Use get_schema first to see products, event names and volumes. Times are RFC3339 UTC \
         strings; filter on `date` (YYYY-MM-DD) to prune partitions. properties/context are JSON \
-        strings — filter with LIKE or parse the returned rows yourself."
+        strings — filter with LIKE or parse the returned rows yourself.",
+        meta = ui::tool_meta()
     )]
     async fn query_events(
         &self,
         Parameters(p): Parameters<QueryEventsParams>,
     ) -> Result<CallToolResult, McpError> {
         let limit = p.limit.unwrap_or(1000).min(MAX_ROWS);
-        let rows = self
-            .engine
-            .query(&p.sql, limit)
-            .await
-            .map_err(|e| McpError::invalid_params(format!("query failed: {e}"), None))?;
-        text_result(json!({"row_count": rows.len(), "rows": rows}))
+        let rows = match self.engine.query(&p.sql, limit).await {
+            Ok(rows) => rows,
+            Err(e) => return tool_error(format!("query failed: {e}")),
+        };
+        text_result(json!({
+            "view": "query",
+            "sql": p.sql,
+            "row_count": rows.len(),
+            "rows": rows,
+        }))
+    }
+
+    #[tool(
+        name = "dashboard",
+        description = "One-call product dashboard over the last N days (default 30): totals \
+        (events, unique users, sessions, average DAU) with the previous period for deltas, \
+        daily events/users, top events and top utm_source. No arguments needed — product \
+        defaults to the busiest one. Renders as an interactive dashboard in hosts that \
+        support MCP Apps.",
+        meta = ui::tool_meta()
+    )]
+    async fn dashboard(
+        &self,
+        Parameters(p): Parameters<DashboardParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match overview::dashboard(
+            &self.engine,
+            p.product.as_deref(),
+            p.days.unwrap_or(30),
+            chrono::Utc::now().date_naive(),
+        )
+        .await
+        {
+            Ok(v) => text_result(v),
+            Err(e) => tool_error(format!("dashboard failed: {e}")),
+        }
     }
 
     #[tool(
@@ -116,7 +159,8 @@ impl PulseMcp {
     #[tool(
         name = "user_timeline",
         description = "Chronological event timeline for a single user of a product — the \
-        'what happened to this user' debugging view. Provide user_id or anonymous_id."
+        'what happened to this user' debugging view. Provide user_id or anonymous_id.",
+        meta = ui::tool_meta()
     )]
     async fn user_timeline(
         &self,
@@ -132,12 +176,7 @@ impl PulseMcp {
                 sql_quote(&p.product)
             ),
             (_, Some(a)) if !a.is_empty() => format!("anonymous_id = {}", sql_quote(a)),
-            _ => {
-                return Err(McpError::invalid_params(
-                    "provide user_id or anonymous_id",
-                    None,
-                ));
-            }
+            _ => return tool_error("provide user_id or anonymous_id".into()),
         };
         let mut sql = format!(
             "SELECT occurred_at, event, source, session_id, properties, context FROM events \
@@ -148,12 +187,22 @@ impl PulseMcp {
             sql.push_str(&format!(" AND occurred_at >= {}", sql_quote(since)));
         }
         sql.push_str(" ORDER BY occurred_at");
-        let rows = self
+        let rows = match self
             .engine
             .query(&sql, p.limit.unwrap_or(200).min(MAX_ROWS))
             .await
-            .map_err(|e| McpError::internal_error(format!("timeline failed: {e}"), None))?;
-        text_result(json!({"row_count": rows.len(), "rows": rows}))
+        {
+            Ok(rows) => rows,
+            Err(e) => return tool_error(format!("timeline failed: {e}")),
+        };
+        text_result(json!({
+            "view": "timeline",
+            "product": p.product,
+            "user_id": p.user_id,
+            "anonymous_id": p.anonymous_id,
+            "row_count": rows.len(),
+            "rows": rows,
+        }))
     }
 
     #[tool(
@@ -161,15 +210,18 @@ impl PulseMcp {
         description = "Ordered conversion funnel computed natively in Rust (ClickHouse \
         windowFunnel semantics): unique users reaching each step in order within the window, \
         counted via identity-aware user_id. steps = 2..10 distinct event names in funnel order; \
-        window like '7d'/'24h'/'90m' (default '7d'); since/until are RFC3339 or YYYY-MM-DD."
+        window like '7d'/'24h'/'90m' (default '7d'); since/until are RFC3339 or YYYY-MM-DD.",
+        meta = ui::tool_meta()
     )]
     async fn funnel(
         &self,
         Parameters(p): Parameters<FunnelParams>,
     ) -> Result<CallToolResult, McpError> {
-        let window = funnel::parse_window(p.window.as_deref().unwrap_or("7d"))
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        let counts = funnel::compute(
+        let window = match funnel::parse_window(p.window.as_deref().unwrap_or("7d")) {
+            Ok(w) => w,
+            Err(e) => return tool_error(e.to_string()),
+        };
+        let counts = match funnel::compute(
             &self.engine,
             &p.product,
             &p.steps,
@@ -178,7 +230,10 @@ impl PulseMcp {
             p.until.as_deref(),
         )
         .await
-        .map_err(|e| McpError::invalid_params(format!("funnel failed: {e}"), None))?;
+        {
+            Ok(c) => c,
+            Err(e) => return tool_error(format!("funnel failed: {e}")),
+        };
 
         let entered = counts.first().copied().unwrap_or(0);
         let steps: Vec<serde_json::Value> = p
@@ -198,8 +253,11 @@ impl PulseMcp {
             })
             .collect();
         text_result(json!({
+            "view": "funnel",
             "product": p.product,
             "window": p.window.as_deref().unwrap_or("7d"),
+            "since": p.since,
+            "until": p.until,
             "entered": entered,
             "steps": steps,
         }))
@@ -214,10 +272,16 @@ fn ratio(num: u64, den: u64) -> serde_json::Value {
     }
 }
 
+/// Execution failures (bad SQL, unknown window…) go back as `isError`
+/// results: the model can read and fix them, and an MCP Apps view gets a
+/// tool-result to render instead of hanging on a protocol error.
+fn tool_error(msg: String) -> Result<CallToolResult, McpError> {
+    Ok(CallToolResult::error(vec![Content::text(msg)]))
+}
+
+/// JSON as text for the model plus `structuredContent` for MCP Apps views.
 fn text_result(v: serde_json::Value) -> Result<CallToolResult, McpError> {
-    let s = serde_json::to_string(&v)
-        .map_err(|e| McpError::internal_error(format!("serialize failed: {e}"), None))?;
-    Ok(CallToolResult::success(vec![Content::text(s)]))
+    Ok(CallToolResult::structured(v))
 }
 
 #[tool_handler]
@@ -228,16 +292,39 @@ impl ServerHandler for PulseMcp {
         server_info.version = env!("CARGO_PKG_VERSION").to_string();
 
         let mut info = ServerInfo::default();
-        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.capabilities = ServerCapabilities::builder()
+            .enable_extensions_with(ui::extensions())
+            .enable_resources()
+            .enable_tools()
+            .build();
         info.server_info = server_info;
         info.instructions = Some(
             "Pulse is a multi-product event analytics store queried via SQL. \
-             Start with get_schema to discover products and events; use funnel \
-             for ordered conversion funnels, query_events for ad-hoc SQL, and \
-             user_timeline to debug a single user's journey."
+             Start with get_schema to discover products and events; use dashboard \
+             for a product overview, funnel for ordered conversion funnels, \
+             query_events for ad-hoc SQL, and user_timeline to debug a single \
+             user's journey."
                 .to_string(),
         );
         info
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        Ok(ListResourcesResult::with_all_items(ui::resources()))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        ui::read(&request.uri).ok_or_else(|| {
+            McpError::resource_not_found(format!("no resource {}", request.uri), None)
+        })
     }
 }
 

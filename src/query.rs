@@ -148,7 +148,10 @@ impl QueryEngine {
         }
 
         if selects.is_empty() {
-            ctx.register_table("events", Arc::new(MemTable::try_new(wal_schema(), vec![])?))?;
+            ctx.register_table(
+                "events",
+                Arc::new(MemTable::try_new(wal_schema(), vec![vec![]])?),
+            )?;
         } else {
             ctx.sql(&format!(
                 "CREATE VIEW events AS {}",
@@ -195,6 +198,20 @@ fn has_files_with_ext(dir: &std::path::Path, ext: &str) -> bool {
         false
     }
     walk(dir, ext)
+}
+
+/// One product's events as a subquery with an identity-stitched `uid`: the
+/// account for identified events, the account an anonymous_id was later
+/// `$identify`-linked to, else the anonymous visitor (NULL if neither).
+/// Lets funnels and user counts treat pre-signup visits as the same person.
+pub fn stitched_events(product: &str) -> String {
+    let p = sql_quote(product);
+    format!(
+        "(SELECT e.*, coalesce(nullif(e.user_id, ''), il.linked, nullif(e.anonymous_id, '')) \
+         AS uid FROM events e LEFT JOIN (SELECT anonymous_id, min(user_id) AS linked \
+         FROM identity_links WHERE product = {p} GROUP BY anonymous_id) il \
+         ON e.anonymous_id = il.anonymous_id WHERE e.product = {p})"
+    )
 }
 
 /// Escape a string as a SQL literal for queries we assemble server-side.
